@@ -1,167 +1,149 @@
 # AURA — Agent UPI Risk Authorizer
 
-**A payment-intent firewall that gates AI-agent payments against Razorpay.**
+**A safety checkpoint for payments made by AI agents.**
 
-AURA sits between an AI agent and Razorpay's payment APIs. It intercepts every
-payment an agent attempts, evaluates it against user-defined policy (and, from
-Phase 4, an AI intent/integrity check), decides **ALLOW / STEP-UP / BLOCK**,
-writes a tamper-evident audit entry explaining why, and only then lets the money
-action reach the rail.
+When an AI assistant tries to pay for something on your behalf, AURA checks the
+payment first. It looks at your rules and decides one of three things — **allow
+it**, **pause and ask you first**, or **block it** — and writes down exactly why.
+Only after it decides "allow" does the payment actually go through.
 
-> Built for the Razorpay Buildathon. **Test mode only — no real funds ever move.**
+> Built for the Razorpay Buildathon. **Test mode only — no real money ever moves.**
 
 ---
 
-## Why
+## Why this exists
 
-AI agents are starting to spend real money. The risk isn't just "too much" — it's
-a payment that doesn't match what the user actually authorized, or an agent that
-has been manipulated (e.g. prompt-injected) into paying the wrong party. AURA
-treats deterministic spend limits as the baseline floor and layers intent &
-integrity checking on top, with every decision bounded, gated, auditable, and
-explainable.
+AI agents are starting to spend real money for people. The danger isn't only
+spending too much — it's paying the wrong person, or paying for something you
+never actually asked for, or an agent that has been tricked into making a bad
+payment. AURA sits in the middle and makes sure every payment stays inside the
+limits you set, and that you can always see the reason behind every decision.
 
-## Core principles
+## What it promises
 
-1. **Deterministic rules are the hard floor.** The AI layer (Phase 4) can only
-   *escalate* toward BLOCK, never downgrade a deterministic decision.
-2. **Fail safe.** On any error, timeout, or ambiguity the system degrades toward
-   STEP-UP / BLOCK — never a silent ALLOW.
-3. **All agent-supplied fields are untrusted** — merchant, reason, notes are data
-   to inspect, never instructions to follow.
-4. **Money is exact.** Users enter rupees (e.g. `"500.34"`); internally
-   everything is integer **paise** (`50034`) via `Decimal` — no floats.
-5. **Every decision is auditable.** Append-only, hash-chained audit log.
+1. **Your rules always win.** The smart checks (added later) can only make a
+   payment *more* cautious, never override a rule you set.
+2. **When in doubt, it stops.** If anything goes wrong or is unclear, AURA pauses
+   or blocks the payment. It never lets a doubtful payment slip through quietly.
+3. **It doesn't trust what the agent says.** Details like the shop name or the
+   agent's reason are treated as information to check, not orders to follow.
+4. **The money is always exact.** You work in rupees (like `500.34`) and the
+   amounts are handled precisely, with no rounding surprises.
+5. **Nothing is hidden.** Every decision is saved in a running record that can't
+   be quietly edited later.
 
-## Architecture
+## How a payment flows
 
 ```
-   AI Agent
-      │  POST /authorize  { payment intent + context }
-      ▼
-┌───────────────────────────────────────────────┐
-│                    AURA                          │
-│  1. Deterministic Policy Engine (hard floor)     │
-│       per-txn / daily / monthly caps · velocity  │
-│       merchant allow/denylist · category rules   │
-│  2. AI Intent & Integrity Layer      (Phase 4)   │
-│  3. Decision Combiner (most-restrictive wins)    │
-│  4. Audit Logger (hash-chained, append-only)     │
-└───────────────────────────────────────────────┘
-      │  if ALLOW → execute money action
-      ▼
-   Razorpay Test-Mode API  (order.create)
+   AI Agent wants to pay
+          │
+          ▼
+   ┌──────────────────────────────┐
+   │            AURA               │
+   │  • Check it against your rules │
+   │  • Decide: allow / ask / block │
+   │  • Save the reason             │
+   └──────────────────────────────┘
+          │
+          ▼
+   If allowed → the payment is made (Razorpay test mode)
 ```
 
-## Decisions
+## The three outcomes
 
-| Outcome     | Meaning                                            |
-|-------------|----------------------------------------------------|
-| **ALLOW**   | Money action executed against Razorpay test mode.  |
-| **STEP_UP** | Held pending human confirmation (`POST /confirm`). |
-| **BLOCK**   | No money action; reason recorded.                  |
+| Outcome     | What it means                                              |
+|-------------|------------------------------------------------------------|
+| **Allow**   | The payment goes through.                                  |
+| **Ask me**  | The payment is paused until you confirm it yourself.       |
+| **Block**   | The payment is stopped, and the reason is saved.           |
 
-**Decision mapping (deterministic engine):**
-- **BLOCK** — per-txn / daily / monthly cap exceeded, velocity exceeded, or a denylisted merchant.
-- **STEP_UP** — an allowlist is configured and this merchant / category is not on it.
-- **ALLOW** — nothing triggered.
+**How AURA decides:**
+- **Block** — the payment is over a limit you set (per payment, per day, or per
+  month), too many payments too quickly, or the shop is on your blocked list.
+- **Ask me** — you've set a list of approved shops or categories, and this one
+  isn't on it, so AURA checks with you first.
+- **Allow** — nothing on your list was triggered.
 
-All rules are evaluated and the **most restrictive** outcome wins, with every
-triggered reason recorded.
+If more than one rule applies, the most cautious outcome wins, and every reason
+is written down.
 
 ## Getting started
 
-**Requirements:** Python 3.11+ and Razorpay **test-mode** API keys.
+You'll need Python (version 3.11 or newer) and a set of Razorpay **test** keys.
 
 ```bash
-# 1. Create and activate a virtualenv
+# 1. Set up a workspace
 python -m venv venv
-# Windows:  venv\Scripts\activate      macOS/Linux:  source venv/bin/activate
+# Windows:  venv\Scripts\activate      Mac/Linux:  source venv/bin/activate
 
-# 2. Install dependencies
+# 2. Install what it needs
 pip install -r requirements.txt
 
-# 3. Configure secrets
-cp .env.example .env      # then edit .env with your test keys
+# 3. Add your test keys
+cp .env.example .env      # then open .env and paste your keys
 
-# 4. Run the server
+# 4. Start it
 uvicorn api.main:app --reload
 ```
 
-`.env`:
+Your `.env` file should contain:
 ```
-RAZORPAY_KEY_ID=rzp_test_xxxxxxxxxxxxxx
-RAZORPAY_KEY_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
+RAZORPAY_KEY_ID=your_test_key_id
+RAZORPAY_KEY_SECRET=your_test_key_secret
 ```
 
-## API
+These keys stay on your machine and are never shared or saved to the project.
 
-| Method & path              | Purpose                                             |
-|----------------------------|-----------------------------------------------------|
-| `GET  /health`             | Liveness + whether Razorpay keys are configured.    |
-| `POST /authorize`          | Evaluate a payment intent → ALLOW / STEP_UP / BLOCK.|
-| `POST /confirm/{id}`       | Human resolves a held STEP_UP; executes the action. |
-| `PUT  /policy/{user_id}`   | Set a user's caps & lists (in rupees).              |
-| `GET  /policy/{user_id}`   | Read a user's policy.                               |
-| `GET  /audit/verify`       | Verify the audit hash chain is intact.              |
+## What you can do with it
 
-### Example
+| Action                         | What it does                                         |
+|--------------------------------|------------------------------------------------------|
+| `GET  /health`                 | Check that the service is running.                   |
+| `POST /authorize`              | Ask AURA to check a payment (allow / ask / block).   |
+| `POST /confirm/{id}`           | Approve a paused payment so it goes through.          |
+| `PUT  /policy/{user_id}`       | Set your own limits and lists (in rupees).            |
+| `GET  /policy/{user_id}`       | See your current limits.                              |
+| `GET  /audit/verify`           | Confirm the saved records haven't been changed.       |
+
+### A quick example
 
 ```bash
-# Set your own limits (rupees)
+# Set your own limits: max 5000 per payment, 1000 for the month, only BigBasket allowed
 curl -X PUT localhost:8000/policy/u1 \
   -H "Content-Type: application/json" \
   -d '{"per_txn_cap":"5000.00","monthly_cap":"1000.00","merchant_allowlist":["BigBasket"]}'
 
-# Authorize a payment
+# The agent tries to pay 800 at BigBasket
 curl -X POST localhost:8000/authorize \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"a1","user_id":"u1","amount_rupees":"800.00",
        "merchant":"BigBasket","category":"groceries",
        "user_intent":"weekly groceries"}'
-# → {"decision":"ALLOW","order_id":"order_...","executed":true, ...}
+# → allowed, and the payment is made
 ```
 
-## Project layout
+## What's inside
 
 ```
-firewall/
-  config.py    # secret loading (.env), secret masking
-  money.py     # exact rupee <-> paise (Decimal, no float)
-  models.py    # Pydantic models: request, policy, decision record
-  policy.py    # deterministic policy engine (the hard floor)
-  audit.py     # hash-chained, tamper-evident audit log + verify_chain()
-  rail.py      # Razorpay test-mode rail (the only file that calls Razorpay)
-api/
-  main.py      # FastAPI endpoints + wiring
-tests/         # unit + integration tests
+firewall/   the core: rules, money handling, saved records, Razorpay connection
+api/        the service people talk to
+tests/      automated checks that everything works
 ```
 
-## Tests
+## Checking it works
 
 ```bash
 pytest -q
 ```
 
-## Failure modes handled
+## Where the project is
 
-| # | Failure                                   | Mitigation                                                       | Status   |
-|---|-------------------------------------------|-----------------------------------------------------------------|----------|
-| 1 | LLM is an unreliable gate                 | Deterministic rules are the hard floor; LLM can only escalate.   | Phase 4  |
-| 2 | LLM outage / timeout mid-decision         | Tiered fallback to deterministic-only; never a silent ALLOW.     | Phase 4  |
-| 3 | Firewall prompt-injected via payload      | Untrusted fields strictly delimited; fixed JSON output schema.   | Phase 4  |
-| 4 | Audit log not tamper-evident              | Hash-chained entries + `verify_chain()`.                         | **Done** |
-| 5 | Non-reproducible decisions                | LLM temperature 0; log model version + prompt hash.              | Phase 4  |
+- Set-up and Razorpay connection — done
+- Basic payment check end to end — done
+- Full set of rules, the paused-payment flow, personal limits, and the
+  tamper-proof record — done
+- Smart intent checks (making sure a payment matches what you actually asked for)
+  — coming next
+- A full test run on many sample payments to measure how well it works — after that
 
-## Roadmap
-
-- **Phase 0–1 ✅** Skeleton, safety, Razorpay test rail proven.
-- **Phase 2 ✅** Walking skeleton: `POST /authorize` → decision → audit → rail.
-- **Phase 3 ✅** Full deterministic engine, tamper-evident audit, STEP_UP + confirm, policy endpoint.
-- **Phase 4** AI intent & integrity layer (LLM judge), decision combiner, LLM-outage fallback.
-- **Phase 5** Evaluation harness: labeled dataset, precision/recall, false-positive rate + cost.
-
-## Status
-
-Phases 0–3 complete and tested. No AI layer yet (by design — the deterministic
-skeleton is proven end-to-end first). **Test mode only; no real money moves.**
+**Test mode only. No real money moves.**
