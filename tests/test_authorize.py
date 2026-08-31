@@ -151,6 +151,50 @@ def test_step_up_holds_then_confirm_executes(client, monkeypatch):
     assert client.post(f"/confirm/{rid}").status_code == 404
 
 
+def test_confirm_with_remember_auto_allows_next_time(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+
+    # Allowlist set so an unknown merchant -> STEP_UP.
+    client.put("/policy/user_1", json={"merchant_allowlist": ["BigBasket"]})
+
+    req = _base_request("500.00")
+    req["merchant"] = "MysteryMart"
+
+    # 1st time: step-up.
+    first = client.post("/authorize", json=req).json()
+    assert first["decision"] == "STEP_UP"
+
+    # Confirm AND remember the merchant.
+    confirm = client.post(f"/confirm/{first['request_id']}?remember=true").json()
+    assert confirm["executed"] is True
+    assert any("added to your allowlist" in r for r in confirm["reasons"])
+
+    # 2nd time to the same merchant: now auto-allowed, no step-up.
+    second = client.post("/authorize", json=req).json()
+    assert second["decision"] == "ALLOW"
+    assert second["executed"] is True
+
+    # And the merchant is on the user's stored allowlist.
+    pol = client.get("/policy/user_1").json()["policy"]
+    assert "MysteryMart" in pol["merchant_allowlist"]
+
+
+def test_confirm_without_remember_still_asks_next_time(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    client.put("/policy/user_1", json={"merchant_allowlist": ["BigBasket"]})
+
+    req = _base_request("500.00")
+    req["merchant"] = "MysteryMart"
+
+    first = client.post("/authorize", json=req).json()
+    assert first["decision"] == "STEP_UP"
+    client.post(f"/confirm/{first['request_id']}")  # no remember
+
+    # Still not remembered -> asks again.
+    second = client.post("/authorize", json=req).json()
+    assert second["decision"] == "STEP_UP"
+
+
 def test_policy_endpoint_enforces_monthly_cap(client, monkeypatch):
     def must_not_call(**kwargs):
         raise AssertionError("rail must NOT be called when monthly cap blocks")

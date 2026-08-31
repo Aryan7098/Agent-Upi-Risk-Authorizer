@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from firewall.audit import AuditLog
+from firewall.combiner import combine
 from firewall.models import (
     AuthorizationRequest,
     Decision,
@@ -42,6 +43,10 @@ rail = RazorpayRail()
 audit = AuditLog(os.getenv("AUDIT_LOG_PATH", "audit_log.jsonl"))
 engine = DeterministicPolicyEngine()
 
+# AI judge — wired in Checkpoint 4C (Groq -> Gemini chain). None = AI layer off,
+# deterministic decision passes through unchanged.
+judge = None
+
 # Per-user policy store. Populated via PUT /policy/{user_id}; default otherwise.
 DEFAULT_POLICY = UserPolicy()
 _policy_store: dict[str, UserPolicy] = {}
@@ -52,6 +57,21 @@ _pending: dict[str, AuthorizationRequest] = {}
 
 def get_policy(user_id: str) -> UserPolicy:
     return _policy_store.get(user_id, DEFAULT_POLICY)
+
+
+def _remember_merchant(user_id: str, merchant: str) -> bool:
+    """Add a merchant to a user's allowlist ('trust on first use').
+
+    Copies the policy so we never mutate the shared DEFAULT_POLICY. Idempotent
+    and case-insensitive. Returns True if the merchant is now on the allowlist."""
+    merchant = merchant.strip()
+    if not merchant:
+        return False
+    updated = get_policy(user_id).model_copy(deep=True)
+    if not any(merchant.casefold() == m.strip().casefold() for m in updated.merchant_allowlist):
+        updated.merchant_allowlist.append(merchant)
+    _policy_store[user_id] = updated
+    return True
 
 
 class AuthorizeResponse(BaseModel):
@@ -116,7 +136,11 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
     # 1. Deterministic engine (the hard floor). History comes from the audit log
     #    for daily/monthly caps and velocity.
     det = engine.evaluate(request, policy, history=audit)
-    final = det.decision  # no LLM yet; combiner arrives in Phase 4.
+
+    # 2. Combine with the AI judge (escalate-only, fail-safe). judge=None until 4C.
+    combined = combine(det, judge, request, policy)
+    final = combined.decision
+    llm = combined.llm_result
 
     record = DecisionRecord(
         request_id=request.request_id,
@@ -124,10 +148,19 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
         amount_paise=request.amount_paise,
         decision=final,
         deterministic_result=det,
-        reasons=list(det.reasons),
+        llm_result=(
+            EngineResult(decision=llm.decision, reasons=[llm.reason]) if llm else None
+        ),
+        reasons=list(combined.reasons),
+        llm_status=combined.llm_status,
+        intent_match=(llm.intent_match if llm else None),
+        manipulation_suspected=(llm.manipulation_suspected if llm else None),
+        model_version=(llm.model_version if llm else None),
+        prompt_hash=(llm.prompt_hash if llm else None),
+        temperature=(llm.temperature if llm else None),
     )
 
-    # 2. Act on the decision.
+    # 3. Act on the decision.
     if final is Decision.ALLOW:
         _execute_on_rail(record, request)
     elif final is Decision.STEP_UP:
@@ -136,14 +169,17 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
         record.reasons.append("held pending human confirmation (POST /confirm/{request_id})")
     # BLOCK: do nothing (no money action).
 
-    # 3. Always write the audit entry.
+    # 4. Always write the audit entry.
     audit.append(record)
     return _to_response(record)
 
 
 @app.post("/confirm/{request_id}", response_model=AuthorizeResponse)
-def confirm(request_id: str) -> AuthorizeResponse:
-    """Resolve a pending STEP_UP: a human approves, so execute the money action."""
+def confirm(request_id: str, remember: bool = False) -> AuthorizeResponse:
+    """Resolve a pending STEP_UP: a human approves, so execute the money action.
+
+    Pass `?remember=true` to also add this merchant to the user's allowlist, so
+    future payments to it are allowed without another step-up."""
     request = _pending.pop(request_id, None)
     if request is None:
         raise HTTPException(status_code=404, detail="no pending step-up for this request_id")
@@ -159,6 +195,12 @@ def confirm(request_id: str) -> AuthorizeResponse:
         ),
         reasons=[f"step-up confirmed by human for {request_id}"],
     )
+
+    if remember and _remember_merchant(request.user_id, request.merchant):
+        record.reasons.append(
+            f"merchant '{request.merchant}' added to your allowlist (will auto-allow next time)"
+        )
+
     _execute_on_rail(record, request)
     audit.append(record)
     return _to_response(record)

@@ -153,6 +153,11 @@ class DecisionRecord(BaseModel):
     order_id: str | None = None
     execution_error: str | None = None
 
+    # AI intent/integrity signals (Phase 4).
+    intent_match: bool | None = None
+    manipulation_suspected: bool | None = None
+    llm_status: str | None = None  # ok | skipped_block | disabled | failed
+
     # Reproducibility (Phase 4).
     model_version: str | None = None
     prompt_hash: str | None = None
