@@ -98,6 +98,16 @@ class AuditLog:
                 count += 1
         return count
 
+    def mean_amount_paise(self, user_id: str) -> float | None:
+        """Mean of a user's executed payment amounts (paise); None if no history.
+        Used by the ML risk layer to personalize per user."""
+        vals = [
+            int(e.get("amount_paise", 0))
+            for e in self.read_all()
+            if e.get("user_id") == user_id and e.get("executed")
+        ]
+        return (sum(vals) / len(vals)) if vals else None
+
     @staticmethod
     def _at_or_after(entry: dict, since: datetime) -> bool:
         ts = entry.get("timestamp")

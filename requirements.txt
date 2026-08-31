@@ -7,6 +7,10 @@ python-dotenv>=1.0
 # Payment rail (test mode only)
 razorpay>=1.4
 
+# ML risk layer (local, unsupervised anomaly detection)
+scikit-learn>=1.4
+numpy>=1.26
+
 # Tests
 pytest>=8.0
 httpx>=0.27

@@ -158,6 +158,10 @@ class DecisionRecord(BaseModel):
     manipulation_suspected: bool | None = None
     llm_status: str | None = None  # ok | skipped_block | disabled | failed
 
+    # ML risk layer signals (Phase 4B).
+    risk_anomaly: bool | None = None
+    risk_score: float | None = None
+
     # Reproducibility (Phase 4).
     model_version: str | None = None
     prompt_hash: str | None = None

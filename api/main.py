@@ -31,6 +31,7 @@ from firewall.models import (
 from firewall.money import paise_to_rupees
 from firewall.policy import DeterministicPolicyEngine
 from firewall.rail import RailError, RazorpayRail
+from firewall.risk import RiskModel
 
 app = FastAPI(
     title="AURA — Agent UPI Risk Authorizer",
@@ -46,6 +47,9 @@ engine = DeterministicPolicyEngine()
 # AI judge — wired in Checkpoint 4C (Groq -> Gemini chain). None = AI layer off,
 # deterministic decision passes through unchanged.
 judge = None
+
+# ML risk layer — always-on, local, escalate-only. Trains on construction.
+risk_model = RiskModel()
 
 # Per-user policy store. Populated via PUT /policy/{user_id}; default otherwise.
 DEFAULT_POLICY = UserPolicy()
@@ -137,10 +141,12 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
     #    for daily/monthly caps and velocity.
     det = engine.evaluate(request, policy, history=audit)
 
-    # 2. Combine with the AI judge (escalate-only, fail-safe). judge=None until 4C.
-    combined = combine(det, judge, request, policy)
+    # 2. Combine rules + ML risk + AI judge (all escalate-only, fail-safe).
+    #    judge=None until 4C; the ML risk layer is always on.
+    combined = combine(det, judge, request, policy, risk=risk_model, history=audit)
     final = combined.decision
     llm = combined.llm_result
+    risk = combined.risk_result
 
     record = DecisionRecord(
         request_id=request.request_id,
@@ -158,6 +164,8 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
         model_version=(llm.model_version if llm else None),
         prompt_hash=(llm.prompt_hash if llm else None),
         temperature=(llm.temperature if llm else None),
+        risk_anomaly=(risk.anomaly if risk else None),
+        risk_score=(risk.score if risk else None),
     )
 
     # 3. Act on the decision.

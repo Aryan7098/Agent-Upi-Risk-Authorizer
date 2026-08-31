@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from firewall.judge import LLMJudge, LLMResult
 from firewall.models import Decision, EngineResult, SEVERITY
+from firewall.risk import RiskAssessment
 
 
 @dataclass
@@ -28,6 +29,7 @@ class CombinedResult:
     llm_result: LLMResult | None = None
     # "ok" | "skipped_block" | "disabled" | "failed"
     llm_status: str = "disabled"
+    risk_result: RiskAssessment | None = None
 
 
 def _most_restrictive(a: Decision, b: Decision) -> Decision:
@@ -39,36 +41,52 @@ def combine(
     judge: LLMJudge | None,
     request,
     policy,
+    risk=None,
+    history=None,
+    now=None,
 ) -> CombinedResult:
     reasons = list(deterministic.reasons)
 
-    # 1. Already blocked by rules → most restrictive already; skip the AI call.
+    # 1. Already blocked by rules → most restrictive already; skip everything.
     if deterministic.decision is Decision.BLOCK:
         return CombinedResult(Decision.BLOCK, reasons, None, "skipped_block")
 
-    # 2. AI layer disabled → deterministic result passes through.
-    if judge is None:
-        return CombinedResult(deterministic.decision, reasons, None, "disabled")
+    final = deterministic.decision
 
-    # 3. Run the judge; fail safe on ANY error (outage, timeout, bad output).
+    # 2. ML risk layer (local, escalate-only, non-fatal). Runs even if the LLM
+    #    is disabled or down — it's the always-on signal.
+    risk_result = None
+    if risk is not None:
+        try:
+            risk_result = risk.assess(request, history, now)
+            if risk_result.anomaly:
+                reasons.append(f"risk model: {risk_result.reason}")
+                final = _most_restrictive(final, risk_result.decision)
+        except Exception as exc:  # noqa: BLE001 — risk is advisory; never fatal
+            reasons.append(f"risk model unavailable ({exc}); ignored")
+
+    # 3. AI layer disabled → return with rules + risk only.
+    if judge is None:
+        return CombinedResult(final, reasons, None, "disabled", risk_result)
+
+    # 4. Run the judge; fail safe on ANY error (outage, timeout, bad output).
     try:
         llm = judge.assess(request, policy)
     except Exception as exc:  # noqa: BLE001 — deliberately catch-all; must fail safe
-        if deterministic.decision is Decision.ALLOW:
+        if final is Decision.ALLOW:
             reasons.append(
                 f"AI intent/integrity check unavailable ({exc}); "
                 f"holding for human confirmation (fail-safe)"
             )
-            return CombinedResult(Decision.STEP_UP, reasons, None, "failed")
-        # STEP_UP stays STEP_UP.
+            return CombinedResult(Decision.STEP_UP, reasons, None, "failed", risk_result)
         reasons.append(
             f"AI intent/integrity check unavailable ({exc}); "
-            f"keeping deterministic {deterministic.decision.value}"
+            f"keeping decision {final.value}"
         )
-        return CombinedResult(deterministic.decision, reasons, None, "failed")
+        return CombinedResult(final, reasons, None, "failed", risk_result)
 
-    # 4. Combine — the AI can only escalate.
-    final = _most_restrictive(deterministic.decision, llm.decision)
+    # 5. Combine — the AI can only escalate.
+    final = _most_restrictive(final, llm.decision)
     if llm.reason:
         reasons.append(f"AI: {llm.reason}")
     if not llm.intent_match:
@@ -76,4 +94,4 @@ def combine(
     if llm.manipulation_suspected:
         reasons.append("AI: possible manipulation / prompt-injection detected")
 
-    return CombinedResult(final, reasons, llm, "ok")
+    return CombinedResult(final, reasons, llm, "ok", risk_result)
