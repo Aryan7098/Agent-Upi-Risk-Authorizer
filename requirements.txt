@@ -1,0 +1,14 @@
+# Core service
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+python-dotenv>=1.0
+
+# Payment rail (test mode only)
+razorpay>=1.4
+
+# Tests
+pytest>=8.0
+httpx>=0.27
+
+# LLM SDK is added in Phase 4 once the provider is chosen.
