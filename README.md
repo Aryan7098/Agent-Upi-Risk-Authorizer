@@ -147,21 +147,35 @@ pytest -q
 
 | # | Failure                                   | Mitigation                                                       | Status   |
 |---|-------------------------------------------|-----------------------------------------------------------------|----------|
-| 1 | LLM is an unreliable gate                 | Deterministic rules are the hard floor; LLM can only escalate.   | Phase 4  |
-| 2 | LLM outage / timeout mid-decision         | Tiered fallback to deterministic-only; never a silent ALLOW.     | Phase 4  |
-| 3 | Firewall prompt-injected via payload      | Untrusted fields strictly delimited; fixed JSON output schema.   | Phase 4  |
+| 1 | LLM is an unreliable gate                 | Deterministic rules are the hard floor; LLM can only escalate.   | **Done** |
+| 2 | LLM outage / timeout mid-decision         | Groq→Gemini→rules+ML+STEP_UP; never a silent ALLOW.              | **Done** |
+| 3 | Firewall prompt-injected via payload      | Untrusted fields strictly delimited; fixed JSON output schema.   | **Done** |
 | 4 | Audit log not tamper-evident              | Hash-chained entries + `verify_chain()`.                         | **Done** |
-| 5 | Non-reproducible decisions                | LLM temperature 0; log model version + prompt hash.              | Phase 4  |
+| 5 | Non-reproducible decisions                | LLM temperature 0; log model version + prompt hash.              | **Done** |
+
+All five failure modes are implemented and demonstrable.
 
 ## Roadmap
 
 - **Phase 0–1 ✅** Skeleton, safety, Razorpay test rail proven.
 - **Phase 2 ✅** Walking skeleton: `POST /authorize` → decision → audit → rail.
 - **Phase 3 ✅** Full deterministic engine, tamper-evident audit, STEP_UP + confirm, policy endpoint.
-- **Phase 4** AI intent & integrity layer (LLM judge), decision combiner, LLM-outage fallback.
-- **Phase 5** Evaluation harness: labeled dataset, precision/recall, false-positive rate + cost.
+- **Phase 4 ✅** AI intent & integrity layer (Groq→Gemini judge), ML risk layer, decision combiner, LLM-outage fallback.
+- **Phase 5 ✅** Evaluation harness: labeled dataset, precision/recall, false-positive rate + cost.
+
+## Evaluation
+
+Run `python -m eval.run` for a full metrics report (confusion matrix, per-class
+precision/recall, false-positive rate + cost, and an honest "still gets wrong"
+list). Headline: on 42 labeled cases, **92.9% accuracy with 0 unsafe allows** —
+every error is over-caution, never a bad payment let through. The AI layer
+catches 10 intent-mismatch / prompt-injection attacks that rules alone allow.
+See [EVAL.md](EVAL.md) for full results, known limitations, and a development
+narrative.
 
 ## Status
 
-Phases 0–3 complete and tested. No AI layer yet (by design — the deterministic
-skeleton is proven end-to-end first). **Test mode only; no real money moves.**
+Phases 0–5 complete and tested (63 unit + integration tests). Four decision
+signals — deterministic rules (hard floor), ML risk, and the Groq→Gemini AI
+judge — combine most-restrictively, with the AI only ever escalating. **Test
+mode only; no real money moves.**
