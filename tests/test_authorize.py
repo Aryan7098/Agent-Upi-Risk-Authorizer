@@ -22,9 +22,11 @@ def client(tmp_path, monkeypatch):
     # Isolate per-user policy + pending state between tests.
     monkeypatch.setattr(main, "_policy_store", {})
     monkeypatch.setattr(main, "_pending", {})
-    # These tests focus on rules/step-up, not ML; disable the risk layer so they
-    # stay deterministic regardless of wall-clock hour. ML has dedicated tests.
+    # These tests focus on rules/step-up, not ML or the LLM; disable both so they
+    # stay deterministic and never hit the network. Those layers have their own
+    # dedicated tests.
     monkeypatch.setattr(main, "risk_model", None)
+    monkeypatch.setattr(main, "judge", None)
     return TestClient(main.app)
 
 

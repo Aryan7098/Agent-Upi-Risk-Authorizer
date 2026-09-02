@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from firewall.audit import AuditLog
 from firewall.combiner import combine
+from firewall.llm import build_judge_from_env
 from firewall.models import (
     AuthorizationRequest,
     Decision,
@@ -44,9 +45,9 @@ rail = RazorpayRail()
 audit = AuditLog(os.getenv("AUDIT_LOG_PATH", "audit_log.jsonl"))
 engine = DeterministicPolicyEngine()
 
-# AI judge — wired in Checkpoint 4C (Groq -> Gemini chain). None = AI layer off,
-# deterministic decision passes through unchanged.
-judge = None
+# AI judge — Groq -> Gemini chain, built from env keys. None if no keys are set
+# (AI layer off; deterministic + ML still run).
+judge = build_judge_from_env()
 
 # ML risk layer — always-on, local, escalate-only. Trains on construction.
 risk_model = RiskModel()
