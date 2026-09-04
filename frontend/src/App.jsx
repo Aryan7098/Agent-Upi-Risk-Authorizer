@@ -267,17 +267,43 @@ function SystemPanel({ health, integrity, s }) {
   )
 }
 
+// Ticks once a second to show how fresh the live feed is.
+function UpdatedAgo({ at }) {
+  const [, tick] = useState(0)
+  useEffect(() => { const t = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(t) }, [])
+  if (!at) return null
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000))
+  const label = s < 5 ? 'just now' : s < 60 ? `${s}s ago` : `${Math.floor(s / 60)}m ago`
+  return <span className="text-faint">updated {label}</span>
+}
+
+// Actionable nudge on Overview when payments are held for confirmation.
+function PendingBanner({ count, onReview }) {
+  if (!count) return null
+  return (
+    <button onClick={onReview} className="press flex w-full items-center justify-between rounded-lg border border-held/40 bg-held/[0.06] px-4 py-3 text-left hover:bg-held/[0.1]">
+      <span className="text-sm text-paper">
+        <span className="mono tnum text-held">{count}</span> payment{count > 1 ? 's' : ''} awaiting your confirmation
+      </span>
+      <span className="text-xs text-held">Review →</span>
+    </button>
+  )
+}
+
 // --- Overview: ledger --------------------------------------------------------
-function Ledger({ decisions, integrity, onVerify, flashId, loaded }) {
+function Ledger({ decisions, integrity, onVerify, flashId, loaded, updatedAt }) {
   return (
     <section>
       <div className="mb-3 flex items-baseline justify-between">
         <h2 className="head">Ledger
           <span className="flex items-center gap-1 text-[10px] font-medium text-faint"><i className="live-dot h-1.5 w-1.5 rounded-full bg-cleared" />live</span>
         </h2>
-        <button onClick={onVerify} className="press text-xs text-faint hover:text-paper">
-          {integrity ? (integrity.valid ? `sealed · ${integrity.entries} entries` : 'chain broken') : 'verify'}
-        </button>
+        <div className="flex items-center gap-3 text-xs">
+          <UpdatedAgo at={updatedAt} />
+          <button onClick={onVerify} className="press text-faint hover:text-paper">
+            {integrity ? (integrity.valid ? `sealed · ${integrity.entries} entries` : 'chain broken') : 'verify'}
+          </button>
+        </div>
       </div>
       {!loaded ? (
         <div className="panel space-y-2 p-4">{[0, 1, 2, 3].map((i) => <div key={i} className="sk h-7 w-full" />)}</div>
@@ -322,7 +348,7 @@ const FIELDS = [
   ['agent_reason', "Agent's stated reason", 'purchasing a coffee'],
 ]
 
-function ResultCard({ res, busy }) {
+function ResultCard({ res, busy, onGoPending }) {
   if (busy) return <div className="panel p-6"><div className="sk h-3 w-16" /><div className="sk mt-4 h-9 w-40" /><div className="sk mt-5 h-4 w-3/4" /></div>
   if (!res) {
     return (
@@ -346,12 +372,17 @@ function ResultCard({ res, busy }) {
       <ul className="mt-5 space-y-1.5">
         {reasons.map((r, i) => <li key={i} className="text-sm leading-relaxed text-mute">{r}</li>)}
       </ul>
-      <p className="mt-5 border-t border-line pt-4 text-xs text-faint">{note}</p>
+      <div className="mt-5 flex items-center justify-between gap-3 border-t border-line pt-4">
+        <p className="text-xs text-faint">{note}</p>
+        {res.decision === 'STEP_UP' && onGoPending && (
+          <button onClick={onGoPending} className="btn-line shrink-0 py-1 text-xs">Review in Pending</button>
+        )}
+      </div>
     </div>
   )
 }
 
-function Simulate({ onDone, user }) {
+function Simulate({ onDone, user, onGoPending }) {
   const [form, setForm] = useState({ ...EMPTY_FORM })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
@@ -422,7 +453,7 @@ function Simulate({ onDone, user }) {
           </div>
         </form>
 
-        <ResultCard res={res} busy={busy} />
+        <ResultCard res={res} busy={busy} onGoPending={onGoPending} />
       </div>
     </section>
   )
@@ -711,6 +742,7 @@ function Dashboard({ user, onLogout }) {
   const [error, setError] = useState(null)
   const [loaded, setLoaded] = useState(false)
   const [flashId, setFlashId] = useState(null)
+  const [updatedAt, setUpdatedAt] = useState(null)
   const topRef = useRef(null)
   const firstRef = useRef(true)
 
@@ -725,6 +757,7 @@ function Dashboard({ user, onLogout }) {
       ])
       setHealth(h); setIntegrity(v); setDecisions(r.decisions || [])
       setPending((p.pending || []).filter((x) => x.user_id === user.id)); setError(null)
+      setUpdatedAt(Date.now())
     } catch (e) { setError(e.message) }
     finally { setLoaded(true) }
   }
@@ -752,15 +785,12 @@ function Dashboard({ user, onLogout }) {
             <h1 className="text-[22px] font-extrabold leading-none tracking-tight text-paper">AURA</h1>
             <p className="eyebrow mt-2">Payment Intent Firewall</p>
           </div>
-          <div className="flex flex-col items-end gap-2">
-            <StatusLine health={health} integrity={integrity} />
-            <div className="flex items-center gap-3 text-[11px] text-faint">
-              <span>{user.name}<span className="text-mute"> · {user.handle || user.id}</span></span>
-              <span className="flex items-center gap-3 border-l border-line pl-3">
-                <DeleteData user={user} onDone={load} />
-                <button onClick={onLogout} className="press hover:text-paper">Sign out</button>
-              </span>
-            </div>
+          <div className="flex items-center gap-3 text-[11px] text-faint">
+            <span>{user.name}<span className="text-mute"> · {user.handle || user.id}</span></span>
+            <span className="flex items-center gap-3 border-l border-line pl-3">
+              <DeleteData user={user} onDone={load} />
+              <button onClick={onLogout} className="press hover:text-paper">Sign out</button>
+            </span>
           </div>
         </header>
 
@@ -791,16 +821,17 @@ function Dashboard({ user, onLogout }) {
           <div key={tab} className="row-rise min-w-0">
             {tab === 'overview' ? (
               <div className="space-y-10">
+                <PendingBanner count={pending.length} onReview={() => setTab('pending')} />
                 <Metrics s={summary} />
                 <Hero d={decisions[0]} loaded={loaded} />
                 <div className="grid gap-6 lg:grid-cols-2">
                   <CaughtBy s={summary} />
                   <SystemPanel health={health} integrity={integrity} s={summary} />
                 </div>
-                <Ledger decisions={decisions} integrity={integrity} onVerify={load} flashId={flashId} loaded={loaded} />
+                <Ledger decisions={decisions} integrity={integrity} onVerify={load} flashId={flashId} loaded={loaded} updatedAt={updatedAt} />
               </div>
             ) : tab === 'simulate' ? (
-              <Simulate onDone={load} user={user} />
+              <Simulate onDone={load} user={user} onGoPending={() => setTab('pending')} />
             ) : tab === 'decisions' ? (
               <Decisions decisions={decisions} integrity={integrity} onVerify={load} loaded={loaded} user={user} />
             ) : tab === 'policy' ? (
