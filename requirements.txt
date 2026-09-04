@@ -11,6 +11,9 @@ razorpay>=1.4
 scikit-learn>=1.4
 numpy>=1.26
 
+# Persistence (SQLite locally; Postgres-ready via DATABASE_URL)
+SQLAlchemy>=2.0
+
 # Tests
 pytest>=8.0
 httpx>=0.27

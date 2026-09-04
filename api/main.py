@@ -33,6 +33,7 @@ from firewall.money import paise_to_rupees
 from firewall.policy import DeterministicPolicyEngine
 from firewall.rail import RailError, RazorpayRail
 from firewall.risk import RiskModel
+from firewall.storage import DbPolicyStore, make_engine
 
 app = FastAPI(
     title="AURA — Agent UPI Risk Authorizer",
@@ -52,16 +53,18 @@ judge = build_judge_from_env()
 # ML risk layer — always-on, local, escalate-only. Trains on construction.
 risk_model = RiskModel()
 
-# Per-user policy store. Populated via PUT /policy/{user_id}; default otherwise.
+# Per-user policy store — persisted in the database (SQLite locally / Postgres in
+# prod). Populated via PUT /policy/{user_id}; default otherwise.
 DEFAULT_POLICY = UserPolicy()
-_policy_store: dict[str, UserPolicy] = {}
+db_engine = make_engine()
+policy_store = DbPolicyStore(db_engine)
 
-# Requests held pending a human step-up confirmation (ephemeral, in-memory).
+# Requests held pending a human step-up confirmation (in-memory until 6C).
 _pending: dict[str, AuthorizationRequest] = {}
 
 
 def get_policy(user_id: str) -> UserPolicy:
-    return _policy_store.get(user_id, DEFAULT_POLICY)
+    return policy_store.get(user_id) or DEFAULT_POLICY
 
 
 def _remember_merchant(user_id: str, merchant: str) -> bool:
@@ -75,7 +78,7 @@ def _remember_merchant(user_id: str, merchant: str) -> bool:
     updated = get_policy(user_id).model_copy(deep=True)
     if not any(merchant.casefold() == m.strip().casefold() for m in updated.merchant_allowlist):
         updated.merchant_allowlist.append(merchant)
-    _policy_store[user_id] = updated
+    policy_store.set(user_id, updated)
     return True
 
 
@@ -218,7 +221,7 @@ def confirm(request_id: str, remember: bool = False) -> AuthorizeResponse:
 @app.put("/policy/{user_id}")
 def set_policy(user_id: str, policy: UserPolicy) -> dict:
     """Set a user's policy (caps in rupees, e.g. "monthly_cap": "50000.00")."""
-    _policy_store[user_id] = policy
+    policy_store.set(user_id, policy)
     return {"user_id": user_id, "policy": policy.model_dump(mode="json")}
 
 
