@@ -17,7 +17,6 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from firewall.audit import AuditLog
 from firewall.combiner import combine
 from firewall.llm import build_judge_from_env
 from firewall.models import (
@@ -33,7 +32,7 @@ from firewall.money import paise_to_rupees
 from firewall.policy import DeterministicPolicyEngine
 from firewall.rail import RailError, RazorpayRail
 from firewall.risk import RiskModel
-from firewall.storage import DbPolicyStore, make_engine
+from firewall.storage import DbPolicyStore, SqlAuditLog, make_engine
 
 app = FastAPI(
     title="AURA — Agent UPI Risk Authorizer",
@@ -43,7 +42,8 @@ app = FastAPI(
 
 # --- Wiring (module-level so tests can substitute/patch these) ---
 rail = RazorpayRail()
-audit = AuditLog(os.getenv("AUDIT_LOG_PATH", "audit_log.jsonl"))
+db_engine = make_engine()
+audit = SqlAuditLog(db_engine)  # tamper-evident audit log, now DB-backed
 engine = DeterministicPolicyEngine()
 
 # AI judge — Groq -> Gemini chain, built from env keys. None if no keys are set
@@ -56,8 +56,7 @@ risk_model = RiskModel()
 # Per-user policy store — persisted in the database (SQLite locally / Postgres in
 # prod). Populated via PUT /policy/{user_id}; default otherwise.
 DEFAULT_POLICY = UserPolicy()
-db_engine = make_engine()
-policy_store = DbPolicyStore(db_engine)
+policy_store = DbPolicyStore(db_engine)  # shares the same database as the audit log
 
 # Requests held pending a human step-up confirmation (in-memory until 6C).
 _pending: dict[str, AuthorizationRequest] = {}

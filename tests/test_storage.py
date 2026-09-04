@@ -1,6 +1,10 @@
-"""Phase 6A: policies persist in the database across 'restarts'."""
-from firewall.models import UserPolicy
-from firewall.storage import DbPolicyStore, make_engine
+"""Phase 6A/6B: policies and the audit log persist in the database."""
+import json
+
+from sqlalchemy import select
+
+from firewall.models import Decision, DecisionRecord, EngineResult, UserPolicy
+from firewall.storage import DbPolicyStore, SqlAuditLog, audit_table, make_engine
 
 
 def test_policy_roundtrip(tmp_path):
@@ -39,3 +43,68 @@ def test_set_updates_existing(tmp_path):
     store.set("u1", UserPolicy(per_txn_cap="1000.00"))
     store.set("u1", UserPolicy(per_txn_cap="9000.00"))
     assert str(store.get("u1").per_txn_cap) == "9000.00"
+
+
+# --- Phase 6B: SQL audit log ----------------------------------------------
+
+def _rec(rid, amount, user="u1", decision=Decision.ALLOW):
+    return DecisionRecord(
+        request_id=rid, user_id=user, amount_paise=amount, decision=decision,
+        deterministic_result=EngineResult(decision=decision, reasons=["r"]),
+        reasons=["r"], executed=(decision is Decision.ALLOW),
+    )
+
+
+def _seeded_log(tmp_path):
+    log = SqlAuditLog(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    log.append(_rec("req_1", 10000))
+    log.append(_rec("req_2", 20000))
+    log.append(_rec("req_3", 30000, decision=Decision.BLOCK))
+    return log
+
+
+def test_sql_audit_chain_verifies(tmp_path):
+    log = _seeded_log(tmp_path)
+    valid, err = log.verify_chain()
+    assert valid is True and err is None
+    # Links populated correctly.
+    entries = log.read_all()
+    assert entries[0]["prev_hash"] == "0" * 64
+    assert entries[1]["prev_hash"] == entries[0]["entry_hash"]
+
+
+def test_sql_audit_persists_across_restart(tmp_path):
+    url = f"sqlite:///{tmp_path / 'aura.db'}"
+    SqlAuditLog(make_engine(url)).append(_rec("req_1", 10000))
+    reopened = SqlAuditLog(make_engine(url))
+    assert len(reopened.read_all()) == 1
+    valid, _ = reopened.verify_chain()
+    assert valid is True
+
+
+def test_sql_audit_tamper_detected(tmp_path):
+    url = f"sqlite:///{tmp_path / 'aura.db'}"
+    log = _seeded_log(tmp_path)
+    engine = make_engine(url)
+    # Tamper: rewrite the amount inside a stored row's JSON.
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(audit_table.c.seq, audit_table.c.entry_json).order_by(audit_table.c.seq)
+        ).first()
+        d = json.loads(row.entry_json)
+        d["amount_paise"] = 99999999
+        conn.execute(
+            audit_table.update().where(audit_table.c.seq == row.seq)
+            .values(entry_json=json.dumps(d, sort_keys=True, separators=(",", ":")))
+        )
+    valid, err = SqlAuditLog(engine).verify_chain()
+    assert valid is False
+    assert "hash mismatch" in err
+
+
+def test_sql_audit_spend_and_velocity(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    log = _seeded_log(tmp_path)  # req_1 (10000) + req_2 (20000) executed; req_3 blocked
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    assert log.total_spent_paise("u1", since) == 30000
+    assert log.txn_count("u1", since) == 2

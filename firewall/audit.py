@@ -7,6 +7,11 @@ delete breaks the chain and is caught by `verify_chain()`.
 This module is also the system's spend/velocity source of truth: daily/monthly
 caps and velocity rules are computed by summing/counting *executed* entries for a
 user within a time window.
+
+`_AuditBase` holds ALL the logic (hash chain, verification, spend/velocity) and
+depends on just two primitives — `_read_raw()` and `_write_entry()`. `AuditLog`
+implements them over a JSONL file; `SqlAuditLog` (in firewall/storage.py) over a
+database table. Both therefore behave identically.
 """
 from __future__ import annotations
 
@@ -31,15 +36,24 @@ def _hash_entry(entry: dict) -> str:
     return hashlib.sha256(_canonical(core).encode("utf-8")).hexdigest()
 
 
-class AuditLog:
-    def __init__(self, path: str | Path = "audit_log.jsonl") -> None:
-        self.path = Path(path)
+class _AuditBase:
+    """Shared hash-chain + query logic. Subclasses provide storage primitives."""
+
+    def __init__(self) -> None:
         self._lock = threading.Lock()
+
+    # --- storage primitives (implemented by subclasses) ----------------------
+
+    def _read_raw(self) -> list[dict]:
+        raise NotImplementedError
+
+    def _write_entry(self, entry: dict) -> None:
+        raise NotImplementedError
 
     # --- writing -------------------------------------------------------------
 
     def _last_hash(self) -> str:
-        entries = self.read_all()
+        entries = self._read_raw()
         if not entries:
             return GENESIS_HASH
         return entries[-1].get("entry_hash") or GENESIS_HASH
@@ -53,17 +67,13 @@ class AuditLog:
             entry = record.model_dump(mode="json")
             record.entry_hash = _hash_entry(entry)
             entry["entry_hash"] = record.entry_hash
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(_canonical(entry) + "\n")
+            self._write_entry(entry)
         return record
 
     # --- reading -------------------------------------------------------------
 
     def read_all(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        with open(self.path, "r", encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+        return self._read_raw()
 
     # --- integrity -----------------------------------------------------------
 
@@ -71,7 +81,7 @@ class AuditLog:
         """Return (is_valid, error). Detects any edit/insert/delete by
         recomputing each entry hash and checking the prev_hash linkage."""
         prev = GENESIS_HASH
-        for i, entry in enumerate(self.read_all()):
+        for i, entry in enumerate(self._read_raw()):
             expected = _hash_entry(entry)
             if entry.get("entry_hash") != expected:
                 return False, f"entry {i} ({entry.get('request_id')}): content hash mismatch (tampered)"
@@ -85,7 +95,7 @@ class AuditLog:
     def total_spent_paise(self, user_id: str, since: datetime) -> int:
         """Sum of executed spend for a user at or after `since` (paise)."""
         total = 0
-        for e in self.read_all():
+        for e in self._read_raw():
             if e.get("user_id") == user_id and e.get("executed") and self._at_or_after(e, since):
                 total += int(e.get("amount_paise", 0))
         return total
@@ -93,7 +103,7 @@ class AuditLog:
     def txn_count(self, user_id: str, since: datetime) -> int:
         """Count of executed transactions for a user at or after `since`."""
         count = 0
-        for e in self.read_all():
+        for e in self._read_raw():
             if e.get("user_id") == user_id and e.get("executed") and self._at_or_after(e, since):
                 count += 1
         return count
@@ -103,7 +113,7 @@ class AuditLog:
         Used by the ML risk layer to personalize per user."""
         vals = [
             int(e.get("amount_paise", 0))
-            for e in self.read_all()
+            for e in self._read_raw()
             if e.get("user_id") == user_id and e.get("executed")
         ]
         return (sum(vals) / len(vals)) if vals else None
@@ -117,3 +127,21 @@ class AuditLog:
             return datetime.fromisoformat(ts) >= since
         except ValueError:
             return False
+
+
+class AuditLog(_AuditBase):
+    """Append-only JSONL file backend."""
+
+    def __init__(self, path: str | Path = "audit_log.jsonl") -> None:
+        super().__init__()
+        self.path = Path(path)
+
+    def _read_raw(self) -> list[dict]:
+        if not self.path.exists():
+            return []
+        with open(self.path, "r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def _write_entry(self, entry: dict) -> None:
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(_canonical(entry) + "\n")

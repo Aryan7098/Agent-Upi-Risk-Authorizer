@@ -14,6 +14,7 @@ import os
 
 from sqlalchemy import (
     Column,
+    Integer,
     MetaData,
     String,
     Table,
@@ -23,6 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 
+from firewall.audit import _AuditBase, _canonical
 from firewall.models import UserPolicy
 
 metadata = MetaData()
@@ -32,6 +34,23 @@ policies_table = Table(
     metadata,
     Column("user_id", String, primary_key=True),
     Column("policy_json", Text, nullable=False),
+)
+
+# Audit entries. `seq` gives append order; `entry_json` holds the full canonical
+# record (the same bytes the file backend writes) so hashing/verification are
+# identical. The flat columns exist for fast indexed spend/velocity lookups.
+audit_table = Table(
+    "audit_entries",
+    metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", String),
+    Column("user_id", String, index=True),
+    Column("executed", Integer),  # 0 / 1
+    Column("amount_paise", Integer),
+    Column("timestamp", String, index=True),
+    Column("entry_hash", String),
+    Column("prev_hash", String),
+    Column("entry_json", Text, nullable=False),
 )
 
 
@@ -84,3 +103,35 @@ class DbPolicyStore:
                 conn.execute(
                     policies_table.insert().values(user_id=user_id, policy_json=payload)
                 )
+
+
+class SqlAuditLog(_AuditBase):
+    """Database-backed audit log. Same hash chain + queries as the file backend;
+    only storage differs. Reads entries in append order (`seq`)."""
+
+    def __init__(self, engine: Engine):
+        super().__init__()
+        self.engine = engine
+        init_db(engine)
+
+    def _read_raw(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(audit_table.c.entry_json).order_by(audit_table.c.seq)
+            ).all()
+        return [json.loads(r[0]) for r in rows]
+
+    def _write_entry(self, entry: dict) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                audit_table.insert().values(
+                    request_id=entry.get("request_id"),
+                    user_id=entry.get("user_id"),
+                    executed=1 if entry.get("executed") else 0,
+                    amount_paise=int(entry.get("amount_paise", 0)),
+                    timestamp=entry.get("timestamp"),
+                    entry_hash=entry.get("entry_hash"),
+                    prev_hash=entry.get("prev_hash"),
+                    entry_json=_canonical(entry),
+                )
+            )
