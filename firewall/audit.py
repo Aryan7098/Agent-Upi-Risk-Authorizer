@@ -50,6 +50,10 @@ class _AuditBase:
     def _write_entry(self, entry: dict) -> None:
         raise NotImplementedError
 
+    def _replace_all(self, entries: list[dict]) -> None:
+        """Overwrite the whole log with `entries`, in order."""
+        raise NotImplementedError
+
     # --- writing -------------------------------------------------------------
 
     def _last_hash(self) -> str:
@@ -74,6 +78,29 @@ class _AuditBase:
 
     def read_all(self) -> list[dict]:
         return self._read_raw()
+
+    # --- erasure -------------------------------------------------------------
+
+    def delete_user_and_reseal(self, user_id: str) -> int:
+        """Remove every entry belonging to `user_id`, then re-seal the remaining
+        entries into a fresh, valid hash chain. This is data erasure, not
+        tampering: `verify_chain()` still passes afterward. Returns the count
+        of entries removed."""
+        with self._lock:
+            entries = self._read_raw()
+            remaining = [e for e in entries if e.get("user_id") != user_id]
+            removed = len(entries) - len(remaining)
+            prev = GENESIS_HASH
+            resealed: list[dict] = []
+            for raw in remaining:
+                entry = dict(raw)
+                entry["prev_hash"] = prev
+                entry.pop("entry_hash", None)
+                entry["entry_hash"] = _hash_entry(entry)
+                prev = entry["entry_hash"]
+                resealed.append(entry)
+            self._replace_all(resealed)
+            return removed
 
     # --- integrity -----------------------------------------------------------
 
@@ -105,6 +132,17 @@ class _AuditBase:
         count = 0
         for e in self._read_raw():
             if e.get("user_id") == user_id and e.get("executed") and self._at_or_after(e, since):
+                count += 1
+        return count
+
+    def attempt_count(self, user_id: str, since: datetime) -> int:
+        """Count of ALL payment attempts for a user at or after `since`, whatever
+        the verdict (executed or not). Frequency rules use this so repeated held
+        or blocked attempts still escalate — an agent spamming attempts is the
+        anomaly, not just successful spend."""
+        count = 0
+        for e in self._read_raw():
+            if e.get("user_id") == user_id and self._at_or_after(e, since):
                 count += 1
         return count
 
@@ -145,3 +183,8 @@ class AuditLog(_AuditBase):
     def _write_entry(self, entry: dict) -> None:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(_canonical(entry) + "\n")
+
+    def _replace_all(self, entries: list[dict]) -> None:
+        with open(self.path, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(_canonical(entry) + "\n")

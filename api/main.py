@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from firewall.combiner import combine
-from firewall.llm import build_judge_from_env
+from firewall.llm import build_judge_from_env, draft_agent_reason
 from firewall.models import (
     AuthorizationRequest,
     Decision,
@@ -232,6 +232,46 @@ def set_policy(user_id: str, policy: UserPolicy) -> dict:
 @app.get("/policy/{user_id}")
 def read_policy(user_id: str) -> dict:
     return {"user_id": user_id, "policy": get_policy(user_id).model_dump(mode="json")}
+
+
+class AgentNoteRequest(BaseModel):
+    style: str = "honest"  # honest | borderline | manipulative
+    amount_rupees: str = ""
+    merchant: str = ""
+    category: str = ""
+    user_intent: str = ""
+
+
+@app.post("/simulate/agent-note")
+def simulate_agent_note(req: AgentNoteRequest) -> dict:
+    """Draft an agent's reason in the requested style (demo helper for the UI)."""
+    if judge is None:
+        raise HTTPException(status_code=503, detail="AI layer is not configured (no LLM keys)")
+    try:
+        note = draft_agent_reason(
+            req.style, req.amount_rupees, req.merchant, req.category, req.user_intent
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"could not draft a reason: {exc}") from exc
+    return {"agent_reason": note, "style": req.style}
+
+
+@app.delete("/profile/{user_id}")
+def delete_profile(user_id: str) -> dict:
+    """Erase a user's data: their audit entries (chain re-sealed), their policy,
+    and any held step-ups. The remaining audit chain still verifies."""
+    audit_removed = audit.delete_user_and_reseal(user_id)
+    policy_removed = policy_store.delete(user_id)
+    pending_removed = pending_store.delete_user(user_id)
+    valid, error = audit.verify_chain()
+    return {
+        "user_id": user_id,
+        "audit_removed": audit_removed,
+        "policy_removed": policy_removed,
+        "pending_removed": pending_removed,
+        "chain_valid": valid,
+        "chain_error": error,
+    }
 
 
 @app.get("/audit/verify")

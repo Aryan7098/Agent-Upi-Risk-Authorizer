@@ -26,6 +26,9 @@ class FakeHistory:
     def txn_count(self, user_id, since):
         return self._count
 
+    def attempt_count(self, user_id, since):
+        return self._count
+
 
 def test_clean_allows():
     r = engine.evaluate(_req("500.00"), UserPolicy(), history=FakeHistory(), now=NOW)
@@ -56,12 +59,22 @@ def test_monthly_cap_blocks():
     assert any("monthly cap" in x for x in r.reasons)
 
 
-def test_velocity_per_hour_blocks():
+def test_velocity_per_hour_steps_up():
     policy = UserPolicy(per_txn_cap="100000.00", max_txns_per_hour=3)
     r = engine.evaluate(_req("100.00"), policy,
                         history=FakeHistory(count=3), now=NOW)
+    assert r.decision is Decision.STEP_UP
+    assert any("frequency limit" in x for x in r.reasons)
+    assert any("payments/hour" in x for x in r.reasons)
+
+
+def test_velocity_far_over_limit_blocks():
+    # A few over the limit step up; many over it (past the grace band) is abuse.
+    policy = UserPolicy(per_txn_cap="100000.00", max_txns_per_hour=3)
+    r = engine.evaluate(_req("100.00"), policy,
+                        history=FakeHistory(count=10), now=NOW)
     assert r.decision is Decision.BLOCK
-    assert any("txns/hour" in x for x in r.reasons)
+    assert any("far over the frequency limit" in x for x in r.reasons)
 
 
 def test_denylist_blocks():

@@ -114,6 +114,15 @@ class DbPolicyStore:
                     policies_table.insert().values(user_id=user_id, policy_json=payload)
                 )
 
+    def delete(self, user_id: str) -> bool:
+        """Remove a user's policy (reverts them to the default). Returns True if
+        a row was deleted."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                policies_table.delete().where(policies_table.c.user_id == user_id)
+            )
+        return bool(result.rowcount)
+
 
 class SqlAuditLog(_AuditBase):
     """Database-backed audit log. Same hash chain + queries as the file backend;
@@ -133,18 +142,26 @@ class SqlAuditLog(_AuditBase):
 
     def _write_entry(self, entry: dict) -> None:
         with self.engine.begin() as conn:
-            conn.execute(
-                audit_table.insert().values(
-                    request_id=entry.get("request_id"),
-                    user_id=entry.get("user_id"),
-                    executed=1 if entry.get("executed") else 0,
-                    amount_paise=int(entry.get("amount_paise", 0)),
-                    timestamp=entry.get("timestamp"),
-                    entry_hash=entry.get("entry_hash"),
-                    prev_hash=entry.get("prev_hash"),
-                    entry_json=_canonical(entry),
-                )
-            )
+            conn.execute(self._insert_values(entry))
+
+    def _replace_all(self, entries: list[dict]) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(audit_table.delete())
+            for entry in entries:
+                conn.execute(self._insert_values(entry))
+
+    @staticmethod
+    def _insert_values(entry: dict):
+        return audit_table.insert().values(
+            request_id=entry.get("request_id"),
+            user_id=entry.get("user_id"),
+            executed=1 if entry.get("executed") else 0,
+            amount_paise=int(entry.get("amount_paise", 0)),
+            timestamp=entry.get("timestamp"),
+            entry_hash=entry.get("entry_hash"),
+            prev_hash=entry.get("prev_hash"),
+            entry_json=_canonical(entry),
+        )
 
 
 class PendingStore:
@@ -194,3 +211,23 @@ class PendingStore:
                 )
             ).all()
         return [AuthorizationRequest(**json.loads(r[0])) for r in rows]
+
+    def delete_user(self, user_id: str) -> int:
+        """Drop all held step-ups belonging to a user. Returns how many."""
+        removed = 0
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                select(pending_table.c.request_id, pending_table.c.request_json)
+            ).all()
+            for request_id, request_json in rows:
+                try:
+                    if json.loads(request_json).get("user_id") == user_id:
+                        conn.execute(
+                            pending_table.delete().where(
+                                pending_table.c.request_id == request_id
+                            )
+                        )
+                        removed += 1
+                except (ValueError, TypeError):
+                    continue
+        return removed

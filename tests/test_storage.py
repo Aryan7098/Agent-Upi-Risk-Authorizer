@@ -114,6 +114,42 @@ def test_sql_audit_tamper_detected(tmp_path):
     assert "hash mismatch" in err
 
 
+def test_delete_user_reseals_and_keeps_chain_valid(tmp_path):
+    url = f"sqlite:///{tmp_path / 'aura.db'}"
+    log = SqlAuditLog(make_engine(url))
+    log.append(_rec("a1", 10000, user="alice"))
+    log.append(_rec("b1", 20000, user="bob"))
+    log.append(_rec("a2", 30000, user="alice"))
+    log.append(_rec("b2", 40000, user="bob"))
+
+    removed = log.delete_user_and_reseal("alice")
+    assert removed == 2
+
+    remaining = log.read_all()
+    assert [e["request_id"] for e in remaining] == ["b1", "b2"]
+    # Chain is re-sealed: still verifies, and links are contiguous again.
+    valid, err = log.verify_chain()
+    assert valid is True and err is None
+    assert remaining[0]["prev_hash"] == "0" * 64
+    assert remaining[1]["prev_hash"] == remaining[0]["entry_hash"]
+
+
+def test_policy_and_pending_delete(tmp_path):
+    url = f"sqlite:///{tmp_path / 'aura.db'}"
+    engine = make_engine(url)
+    policies = DbPolicyStore(engine)
+    policies.set("alice", UserPolicy(per_txn_cap="500.00"))
+    assert policies.delete("alice") is True
+    assert policies.get("alice") is None
+
+    pending = PendingStore(engine)
+    r = _pending_req("p1")
+    r.user_id = "alice"
+    pending.put(r)
+    assert pending.delete_user("alice") == 1
+    assert pending.list_all() == []
+
+
 def test_sql_audit_spend_and_velocity(tmp_path):
     from datetime import datetime, timedelta, timezone
     log = _seeded_log(tmp_path)  # req_1 (10000) + req_2 (20000) executed; req_3 blocked

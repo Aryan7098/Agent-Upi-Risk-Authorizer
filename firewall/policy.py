@@ -5,10 +5,11 @@ with every triggered reason collected. Comparisons are in exact integer paise;
 reasons are rendered in rupees.
 
 Decision mapping (documented so it can be audited by eye):
-  BLOCK   — hard limits: per-txn / daily / monthly cap exceeded, velocity
-            exceeded, or a denylisted merchant.
-  STEP_UP — needs a human: an allowlist is configured and this merchant /
-            category is not on it (unknown payee).
+  BLOCK   — hard limits: per-txn / daily / monthly cap exceeded, or a
+            denylisted merchant.
+  STEP_UP — needs a human: payment frequency (velocity) exceeded, or an
+            allowlist is configured and this merchant / category is not on it
+            (unknown payee).
   ALLOW   — nothing triggered.
 
 `history` is any object exposing `total_spent_paise(user_id, since)` and
@@ -31,6 +32,9 @@ from firewall.models import (
 from firewall.money import format_rupees
 
 MONTH_DAYS = 30
+# Payments over a frequency limit step up for confirmation; once this many
+# over the limit, it's clearly abuse and we block outright.
+VELOCITY_STEPUP_GRACE = 3
 
 
 def _norm(s: str) -> str:
@@ -81,24 +85,34 @@ class DeterministicPolicyEngine:
                     f"{format_rupees(amount)} > {format_rupees(policy.monthly_cap_paise)}",
                 ))
 
-        # --- Velocity (BLOCK) -------------------------------------------------
-        if policy.max_txns_per_hour is not None and history is not None:
-            n = history.txn_count(request.user_id, now - timedelta(hours=1))
-            if n + 1 > policy.max_txns_per_hour:
+        # --- Payment frequency / velocity -------------------------------------
+        # A few payments over the limit STEP_UP (please confirm); many over it is
+        # abuse and BLOCKs. Counts all recent attempts, so held/blocked attempts
+        # still escalate toward a block.
+        def _frequency_hit(limit: int, attempts: int, unit: str) -> None:
+            over = attempts + 1 - limit
+            if over <= 0:
+                return
+            if over <= VELOCITY_STEPUP_GRACE:
+                hits.append((
+                    Decision.STEP_UP,
+                    f"over the frequency limit of {limit} payments/{unit} "
+                    f"({attempts} already in the last {unit}) — needs confirmation",
+                ))
+            else:
                 hits.append((
                     Decision.BLOCK,
-                    f"would exceed velocity limit of {policy.max_txns_per_hour} txns/hour "
-                    f"(already {n} in the last hour)",
+                    f"far over the frequency limit of {limit} payments/{unit} "
+                    f"({attempts} already in the last {unit}) — blocked as abuse",
                 ))
 
+        if policy.max_txns_per_hour is not None and history is not None:
+            _frequency_hit(policy.max_txns_per_hour,
+                           history.attempt_count(request.user_id, now - timedelta(hours=1)), "hour")
+
         if policy.max_txns_per_day is not None and history is not None:
-            n = history.txn_count(request.user_id, now - timedelta(days=1))
-            if n + 1 > policy.max_txns_per_day:
-                hits.append((
-                    Decision.BLOCK,
-                    f"would exceed velocity limit of {policy.max_txns_per_day} txns/day "
-                    f"(already {n} in the last 24h)",
-                ))
+            _frequency_hit(policy.max_txns_per_day,
+                           history.attempt_count(request.user_id, now - timedelta(days=1)), "day")
 
         # --- Merchant denylist (BLOCK) ---------------------------------------
         if policy.merchant_denylist and _in_list(request.merchant, policy.merchant_denylist):

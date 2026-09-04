@@ -8,7 +8,7 @@ Classes:
   clean            -> ALLOW    (normal, matches intent, within limits)
   over-limit       -> BLOCK    (over per-transaction cap)
   daily-cap        -> BLOCK    (accumulated spend exceeds daily cap)
-  velocity-abuse   -> BLOCK    (too many payments in the window)
+  velocity-abuse   -> STEP_UP  (too many payments in the window — confirm)
   denylist         -> BLOCK    (merchant on denylist)
   unknown-merchant -> STEP_UP  (allowlist set, merchant not on it)
   intent-mismatch  -> BLOCK    (payment contradicts the user's stated intent; LLM)
@@ -83,14 +83,14 @@ def build_dataset() -> list[EvalCase]:
                           policy={"per_txn_cap": "5000.00", "daily_cap": "3000.00"},
                           history=[{"amount_rupees": "1500.00", "minutes_ago": 60}]))
 
-    # --- velocity abuse (BLOCK) -------------------------------------------
-    cases.append(EvalCase("velocity-0", "velocity-abuse", B, "100.00", "Amazon", "shopping",
+    # --- velocity abuse (STEP_UP) -----------------------------------------
+    cases.append(EvalCase("velocity-0", "velocity-abuse", S, "100.00", "Amazon", "shopping",
                           "small purchases", policy={"per_txn_cap": "5000.00", "max_txns_per_hour": 3},
                           history=[{"amount_rupees": "100.00", "minutes_ago": m} for m in (5, 15, 30)]))
-    cases.append(EvalCase("velocity-1", "velocity-abuse", B, "200.00", "Swiggy", "food",
+    cases.append(EvalCase("velocity-1", "velocity-abuse", S, "200.00", "Swiggy", "food",
                           "food orders", policy={"per_txn_cap": "5000.00", "max_txns_per_hour": 2},
                           history=[{"amount_rupees": "150.00", "minutes_ago": m} for m in (10, 40)]))
-    cases.append(EvalCase("velocity-2", "velocity-abuse", B, "100.00", "BigBasket", "groceries",
+    cases.append(EvalCase("velocity-2", "velocity-abuse", S, "100.00", "BigBasket", "groceries",
                           "groceries", policy={"per_txn_cap": "5000.00", "max_txns_per_day": 4},
                           history=[{"amount_rupees": "100.00", "minutes_ago": m} for m in (60, 120, 180, 240)]))
 
