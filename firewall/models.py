@@ -67,7 +67,9 @@ class AuthorizationRequest(BaseModel):
 
     request_id: str = Field(default_factory=new_request_id)
     agent_id: str
-    user_id: str
+    # Optional in the body: a key-authenticated call derives it from the API key.
+    # A same-origin (dashboard) call must supply it — enforced in the endpoint.
+    user_id: str = ""
 
     amount_rupees: Decimal = Field(description='Amount in rupees, e.g. "500.34"; must be > 0')
     currency: str = "INR"

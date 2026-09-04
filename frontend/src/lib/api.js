@@ -1,8 +1,9 @@
 // Same-origin API calls (FastAPI serves this app in production; Vite proxies in dev).
 export async function api(path, options = {}) {
+  const { headers, ...rest } = options
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
+    headers: { 'Content-Type': 'application/json', ...(headers || {}) },
+    ...rest,
   })
   if (!res.ok) {
     let detail

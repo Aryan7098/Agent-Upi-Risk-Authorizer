@@ -13,9 +13,12 @@ silent allow of an unrecorded payment.
 from __future__ import annotations
 
 import os
+import threading
+import time
+from collections import defaultdict
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,7 +37,14 @@ from firewall.money import paise_to_rupees
 from firewall.policy import DeterministicPolicyEngine
 from firewall.rail import RailError, RazorpayRail
 from firewall.risk import RiskModel
-from firewall.storage import DbPolicyStore, PendingStore, SqlAuditLog, make_engine
+from firewall.storage import (
+    ApiKeyStore,
+    DbPolicyStore,
+    IdempotencyStore,
+    PendingStore,
+    SqlAuditLog,
+    make_engine,
+)
 
 app = FastAPI(
     title="AURA — Agent UPI Risk Authorizer",
@@ -63,6 +73,43 @@ policy_store = DbPolicyStore(db_engine)  # shares the same database as the audit
 # Requests held pending a human step-up confirmation — persisted, so a held
 # payment survives a restart and can still be confirmed later.
 pending_store = PendingStore(db_engine)
+
+# API keys — how a real external agent authenticates to POST /authorize as its
+# owner. The dashboard's own tester calls same-origin without a key.
+api_key_store = ApiKeyStore(db_engine)
+
+# Idempotency — a retry of /authorize with the same Idempotency-Key returns the
+# original verdict instead of screening (or executing) the payment twice.
+idempotency_store = IdempotencyStore(db_engine)
+
+
+class RateLimiter:
+    """A simple per-key sliding-window limiter. In-memory and per-process — fine
+    for a single-worker deployment; a multi-worker fleet would move this to Redis.
+    A firewall should throttle its own front door, so a leaked or runaway key
+    cannot hammer /authorize."""
+
+    def __init__(self, limit: int, window_seconds: float = 60.0):
+        self.limit = limit
+        self.window = window_seconds
+        self._hits: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def check(self, key: str) -> bool:
+        """Record a hit; return True if allowed, False if over the limit."""
+        now = time.monotonic()
+        with self._lock:
+            recent = [t for t in self._hits[key] if now - t < self.window]
+            if len(recent) >= self.limit:
+                self._hits[key] = recent
+                return False
+            recent.append(now)
+            self._hits[key] = recent
+            return True
+
+
+# Requests per key per minute for key-authenticated calls (env-tunable).
+rate_limiter = RateLimiter(limit=int(os.getenv("AURA_RATE_LIMIT_PER_MIN", "60")))
 
 
 def get_policy(user_id: str) -> UserPolicy:
@@ -135,8 +182,53 @@ def health() -> dict:
     }
 
 
+def _bearer_token(authorization: str | None) -> str | None:
+    """Extract the token from an `Authorization: Bearer <token>` header."""
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return None
+
+
 @app.post("/authorize", response_model=AuthorizeResponse)
-def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
+def authorize(
+    request: AuthorizationRequest,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None),
+) -> AuthorizeResponse:
+    # An external agent authenticates with an API key; the key's owner becomes the
+    # authoritative user_id (a caller cannot screen payments as someone else). The
+    # dashboard's own tester calls same-origin without a key and uses the body's
+    # user_id. A key that is present but invalid is rejected — never fail open.
+    token = _bearer_token(authorization)
+    if token is not None:
+        meta = api_key_store.resolve_meta(token)
+        if meta is None:
+            raise HTTPException(status_code=401, detail="invalid or revoked API key")
+        request.user_id = meta["user_id"]
+        # Throttle key-authenticated traffic per individual key.
+        if not rate_limiter.check(meta["id"]):
+            raise HTTPException(
+                status_code=429,
+                detail="rate limit exceeded — slow down and retry shortly",
+                headers={"Retry-After": "60"},
+            )
+    elif not request.user_id.strip():
+        # No API key and no identity: nothing to scope the decision to.
+        raise HTTPException(
+            status_code=400,
+            detail="user_id is required, or authenticate with an API key",
+        )
+
+    # Idempotency: a retry with the same key (scoped to this user) replays the
+    # original verdict without screening or executing the payment again.
+    if idempotency_key:
+        prior = idempotency_store.get(request.user_id, idempotency_key)
+        if prior is not None:
+            return AuthorizeResponse(**prior)
+
     # Server owns identity + time; never trust client-supplied values for these.
     request.request_id = new_request_id()
     request.timestamp = now_iso()
@@ -186,7 +278,12 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
 
     # 4. Always write the audit entry.
     audit.append(record)
-    return _to_response(record)
+
+    response = _to_response(record)
+    # Record the verdict under the idempotency key so a retry replays it exactly.
+    if idempotency_key:
+        idempotency_store.put(request.user_id, idempotency_key, response.model_dump())
+    return response
 
 
 @app.post("/confirm/{request_id}", response_model=AuthorizeResponse)
@@ -234,6 +331,36 @@ def read_policy(user_id: str) -> dict:
     return {"user_id": user_id, "policy": get_policy(user_id).model_dump(mode="json")}
 
 
+class CreateKeyRequest(BaseModel):
+    user_id: str
+    name: str = ""
+
+
+@app.post("/keys")
+def create_key(req: CreateKeyRequest) -> dict:
+    """Mint an API key for a user. The plaintext `key` is returned ONCE here and
+    never stored — the caller must copy it now."""
+    if not req.user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id is required")
+    return api_key_store.create(req.user_id, req.name)
+
+
+@app.get("/keys")
+def list_keys(user_id: str) -> dict:
+    """Masked metadata for a user's keys (never the key itself)."""
+    keys = api_key_store.list_for(user_id)
+    return {"count": len(keys), "keys": keys}
+
+
+@app.delete("/keys/{key_id}")
+def revoke_key(key_id: str, user_id: str) -> dict:
+    """Revoke one key. Scoped to its owner."""
+    revoked = api_key_store.delete(key_id, user_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="no such key for this user")
+    return {"revoked": True, "id": key_id}
+
+
 class AgentNoteRequest(BaseModel):
     style: str = "honest"  # honest | borderline | manipulative
     amount_rupees: str = ""
@@ -263,12 +390,15 @@ def delete_profile(user_id: str) -> dict:
     audit_removed = audit.delete_user_and_reseal(user_id)
     policy_removed = policy_store.delete(user_id)
     pending_removed = pending_store.delete_user(user_id)
+    keys_removed = api_key_store.delete_user(user_id)
+    idempotency_store.delete_user(user_id)
     valid, error = audit.verify_chain()
     return {
         "user_id": user_id,
         "audit_removed": audit_removed,
         "policy_removed": policy_removed,
         "pending_removed": pending_removed,
+        "keys_removed": keys_removed,
         "chain_valid": valid,
         "chain_error": error,
     }

@@ -12,7 +12,14 @@ from fastapi.testclient import TestClient
 import api.main as main
 from firewall.models import Decision
 from firewall.rail import OrderResult, RailError
-from firewall.storage import DbPolicyStore, PendingStore, SqlAuditLog, make_engine
+from firewall.storage import (
+    ApiKeyStore,
+    DbPolicyStore,
+    IdempotencyStore,
+    PendingStore,
+    SqlAuditLog,
+    make_engine,
+)
 
 
 @pytest.fixture
@@ -22,6 +29,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "audit", SqlAuditLog(eng))
     monkeypatch.setattr(main, "policy_store", DbPolicyStore(eng))
     monkeypatch.setattr(main, "pending_store", PendingStore(eng))
+    monkeypatch.setattr(main, "api_key_store", ApiKeyStore(eng))
+    monkeypatch.setattr(main, "idempotency_store", IdempotencyStore(eng))
+    # Fresh rate limiter each test so counts don't leak between tests.
+    monkeypatch.setattr(main, "rate_limiter", main.RateLimiter(limit=60))
     # These tests focus on rules/step-up, not ML or the LLM; disable both so they
     # stay deterministic and never hit the network. Those layers have their own
     # dedicated tests.
@@ -251,3 +262,126 @@ def test_pending_endpoint_lists_held(client, monkeypatch):
     data = client.get("/pending").json()
     assert data["count"] == 1
     assert data["pending"][0]["merchant"] == "MysteryMart"
+
+
+# --- API-key authentication on /authorize ---------------------------------
+
+def test_authorize_with_api_key_scopes_to_owner(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    key = client.post("/keys", json={"user_id": "alice", "name": "agent"}).json()["key"]
+
+    # Body claims a different user_id, but the key's owner (alice) wins.
+    req = _base_request("500.00")
+    req["user_id"] = "IMPERSONATED"
+    resp = client.post("/authorize", json=req, headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+
+    recent = client.get("/audit/recent?user_id=alice").json()
+    assert recent["count"] == 1
+    assert recent["decisions"][0]["user_id"] == "alice"
+
+
+def test_authorize_with_key_needs_no_user_id_in_body(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    key = client.post("/keys", json={"user_id": "alice"}).json()["key"]
+    body = _base_request("500.00")
+    del body["user_id"]  # a keyed agent derives identity from the key
+    resp = client.post("/authorize", json=body, headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200
+    recent = client.get("/audit/recent?user_id=alice").json()
+    assert recent["count"] == 1
+
+
+def test_authorize_without_key_and_without_user_id_is_400(client):
+    body = _base_request("500.00")
+    del body["user_id"]
+    resp = client.post("/authorize", json=body)
+    assert resp.status_code == 400
+
+
+def test_authorize_rejects_invalid_key(client):
+    req = _base_request("500.00")
+    resp = client.post("/authorize", json=req, headers={"Authorization": "Bearer aura_sk_bogus"})
+    assert resp.status_code == 401
+
+
+def test_authorize_without_key_uses_body_user(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    resp = client.post("/authorize", json=_base_request("500.00"))
+    assert resp.status_code == 200
+    recent = client.get("/audit/recent?user_id=user_1").json()
+    assert recent["count"] == 1
+
+
+def test_revoked_key_is_rejected(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    made = client.post("/keys", json={"user_id": "alice"}).json()
+    key, kid = made["key"], made["id"]
+    # Works before revoke.
+    assert client.post("/authorize", json=_base_request("500.00"),
+                       headers={"Authorization": f"Bearer {key}"}).status_code == 200
+    # Revoke, then the same key is refused.
+    assert client.delete(f"/keys/{kid}?user_id=alice").json()["revoked"] is True
+    assert client.post("/authorize", json=_base_request("500.00"),
+                       headers={"Authorization": f"Bearer {key}"}).status_code == 401
+
+
+def test_keys_listing_never_returns_plaintext(client):
+    client.post("/keys", json={"user_id": "alice", "name": "agent"})
+    listed = client.get("/keys?user_id=alice").json()
+    assert listed["count"] == 1
+    assert "key" not in listed["keys"][0]
+    assert listed["keys"][0]["prefix"].startswith("aura_sk_")
+
+
+# --- Rate limiting & idempotency ------------------------------------------
+
+def test_rate_limit_returns_429_over_limit(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    monkeypatch.setattr(main, "rate_limiter", main.RateLimiter(limit=2))
+    key = client.post("/keys", json={"user_id": "alice"}).json()["key"]
+    h = {"Authorization": f"Bearer {key}"}
+
+    assert client.post("/authorize", json=_base_request("100.00"), headers=h).status_code == 200
+    assert client.post("/authorize", json=_base_request("100.00"), headers=h).status_code == 200
+    third = client.post("/authorize", json=_base_request("100.00"), headers=h)
+    assert third.status_code == 429
+    assert third.headers.get("Retry-After") == "60"
+
+
+def test_rate_limit_only_applies_to_keyed_calls(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    monkeypatch.setattr(main, "rate_limiter", main.RateLimiter(limit=1))
+    # Same-origin (no key) calls are the owner's own browser — never throttled.
+    for _ in range(3):
+        assert client.post("/authorize", json=_base_request("100.00")).status_code == 200
+
+
+def test_idempotency_replays_verdict_and_does_not_double_execute(client, monkeypatch):
+    orders = []
+    monkeypatch.setattr(main.rail, "create_order",
+                        lambda **k: orders.append(k) or _fake_order(**k))
+    h = {"Idempotency-Key": "order-abc"}
+
+    first = client.post("/authorize", json=_base_request("500.00"), headers=h).json()
+    second = client.post("/authorize", json=_base_request("500.00"), headers=h).json()
+
+    # Same verdict object replayed — identical request_id.
+    assert first["request_id"] == second["request_id"]
+    # Executed exactly once, and only one audit entry was written.
+    assert len(orders) == 1
+    assert len(main.audit.read_all()) == 1
+
+
+def test_idempotency_key_is_scoped_per_user(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    ka = client.post("/keys", json={"user_id": "alice"}).json()["key"]
+    kb = client.post("/keys", json={"user_id": "bob"}).json()["key"]
+    idem = {"Idempotency-Key": "shared-id"}
+
+    ra = client.post("/authorize", json=_base_request("500.00"),
+                     headers={**idem, "Authorization": f"Bearer {ka}"}).json()
+    rb = client.post("/authorize", json=_base_request("500.00"),
+                     headers={**idem, "Authorization": f"Bearer {kb}"}).json()
+    # Same idempotency string, different users -> two independent verdicts.
+    assert ra["request_id"] != rb["request_id"]

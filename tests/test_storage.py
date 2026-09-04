@@ -11,7 +11,9 @@ from firewall.models import (
     UserPolicy,
 )
 from firewall.storage import (
+    ApiKeyStore,
     DbPolicyStore,
+    IdempotencyStore,
     PendingStore,
     SqlAuditLog,
     audit_table,
@@ -148,6 +150,82 @@ def test_policy_and_pending_delete(tmp_path):
     pending.put(r)
     assert pending.delete_user("alice") == 1
     assert pending.list_all() == []
+
+
+# --- API keys -------------------------------------------------------------
+
+def test_api_key_create_returns_plaintext_once_and_resolves(tmp_path):
+    store = ApiKeyStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    made = store.create("alice", "shopping agent")
+    assert made["key"].startswith("aura_sk_test_")   # test-mode prefix
+    assert made["prefix"] == made["key"][:16]
+    # The presented plaintext resolves to its owner.
+    assert store.resolve(made["key"]) == "alice"
+    # resolve_meta exposes the key id too (for per-key rate limiting).
+    meta = store.resolve_meta(made["key"])
+    assert meta["user_id"] == "alice"
+    assert meta["id"] == made["id"]
+    # The listing never leaks the plaintext, only masked metadata.
+    listed = store.list_for("alice")
+    assert len(listed) == 1
+    assert "key" not in listed[0]
+    assert listed[0]["prefix"] == made["prefix"]
+    # last_used_at is recorded on a successful resolve.
+    assert listed[0]["last_used_at"] is not None
+
+
+def test_api_key_only_hash_is_stored(tmp_path):
+    from firewall.storage import api_keys_table
+    engine = make_engine(f"sqlite:///{tmp_path / 'aura.db'}")
+    store = ApiKeyStore(engine)
+    made = store.create("alice")
+    with engine.connect() as conn:
+        row = conn.execute(select(api_keys_table.c.key_hash)).first()
+    # The raw key must not be recoverable from the database.
+    assert row[0] != made["key"]
+    assert len(row[0]) == 64  # sha256 hex
+
+
+def test_api_key_unknown_and_revoked_do_not_resolve(tmp_path):
+    store = ApiKeyStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    made = store.create("alice")
+    assert store.resolve("aura_sk_not_a_real_key") is None
+    # Revoke scoped to owner: bob cannot revoke alice's key.
+    assert store.delete(made["id"], "bob") is False
+    assert store.resolve(made["key"]) == "alice"
+    assert store.delete(made["id"], "alice") is True
+    assert store.resolve(made["key"]) is None
+
+
+def test_api_key_delete_user(tmp_path):
+    store = ApiKeyStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    store.create("alice")
+    store.create("alice")
+    store.create("bob")
+    assert store.delete_user("alice") == 2
+    assert store.list_for("alice") == []
+    assert len(store.list_for("bob")) == 1
+
+
+# --- Idempotency ----------------------------------------------------------
+
+def test_idempotency_first_write_wins_and_scopes_per_user(tmp_path):
+    store = IdempotencyStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    assert store.get("alice", "k1") is None
+
+    store.put("alice", "k1", {"decision": "ALLOW", "request_id": "req_1"})
+    # A repeat with the same key replays the original; a later put never overwrites.
+    store.put("alice", "k1", {"decision": "BLOCK", "request_id": "req_2"})
+    assert store.get("alice", "k1")["request_id"] == "req_1"
+
+    # Same key string, different user -> independent record.
+    assert store.get("bob", "k1") is None
+    store.put("bob", "k1", {"decision": "STEP_UP", "request_id": "req_3"})
+    assert store.get("bob", "k1")["request_id"] == "req_3"
+
+    assert store.delete_user("alice") == 1
+    assert store.get("alice", "k1") is None
+    assert store.get("bob", "k1") is not None
 
 
 def test_sql_audit_spend_and_velocity(tmp_path):

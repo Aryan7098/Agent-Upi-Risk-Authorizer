@@ -9,8 +9,11 @@ their own tables in the same database.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column,
@@ -53,6 +56,21 @@ audit_table = Table(
     Column("entry_json", Text, nullable=False),
 )
 
+# API keys let a real agent authenticate to POST /authorize as its owner. Only a
+# SHA-256 hash of the key is stored — the plaintext key is shown once at creation
+# and never persisted, so a leaked database cannot be used to call the firewall.
+api_keys_table = Table(
+    "api_keys",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("user_id", String, index=True),
+    Column("name", String),
+    Column("prefix", String),        # first chars, safe to display (aura_sk_ab12…)
+    Column("key_hash", String, index=True),
+    Column("created_at", String),
+    Column("last_used_at", String),
+)
+
 # Payments held awaiting human step-up confirmation. Persisted so a held payment
 # survives a restart and can still be confirmed later.
 pending_table = Table(
@@ -60,6 +78,19 @@ pending_table = Table(
     metadata,
     Column("request_id", String, primary_key=True),
     Column("request_json", Text, nullable=False),
+    Column("created_at", String),
+)
+
+# Idempotency records: a client that retries /authorize with the same
+# Idempotency-Key gets back the ORIGINAL verdict instead of a second screening —
+# so a network retry can never execute the same payment twice. Scoped per user so
+# two accounts can reuse the same key string without colliding.
+idempotency_table = Table(
+    "idempotency",
+    metadata,
+    Column("scope", String, primary_key=True),   # f"{user_id}\x00{idempotency_key}"
+    Column("user_id", String, index=True),
+    Column("response_json", Text, nullable=False),
     Column("created_at", String),
 )
 
@@ -236,3 +267,172 @@ class PendingStore:
                 except (ValueError, TypeError):
                     continue
         return removed
+
+
+# Plaintext keys look like: aura_sk_test_<43 url-safe chars>. The `test_` segment
+# mirrors how Stripe/Razorpay name test-mode keys — this integration is test mode
+# only. The prefix shown in the UI is the first 16 characters (the label plus a
+# few random chars), enough to recognize a key without exposing it.
+KEY_PREFIX = "aura_sk_test_"
+PREFIX_DISPLAY_LEN = 16
+
+
+def _hash_key(plaintext: str) -> str:
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+class ApiKeyStore:
+    """Per-user API keys for authenticating an external agent to /authorize.
+
+    Security model: the plaintext key is generated here, returned once, and never
+    stored — only its SHA-256 hash is. Lookups hash the presented key and match on
+    the hash, so the database never holds anything that can call the firewall."""
+
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        init_db(engine)
+
+    def create(self, user_id: str, name: str = "") -> dict:
+        """Mint a new key for a user. Returns a dict that INCLUDES the one-time
+        plaintext `key` — surface it to the user immediately, then forget it."""
+        plaintext = KEY_PREFIX + secrets.token_urlsafe(32)
+        key_id = "key_" + secrets.token_hex(8)
+        created = datetime.now(timezone.utc).isoformat()
+        prefix = plaintext[:PREFIX_DISPLAY_LEN]
+        with self.engine.begin() as conn:
+            conn.execute(
+                api_keys_table.insert().values(
+                    id=key_id,
+                    user_id=user_id,
+                    name=(name or "").strip()[:60],
+                    prefix=prefix,
+                    key_hash=_hash_key(plaintext),
+                    created_at=created,
+                    last_used_at=None,
+                )
+            )
+        return {
+            "id": key_id,
+            "name": (name or "").strip()[:60],
+            "prefix": prefix,
+            "created_at": created,
+            "last_used_at": None,
+            "key": plaintext,  # one-time only
+        }
+
+    def list_for(self, user_id: str) -> list[dict]:
+        """Masked metadata for a user's keys (never the key itself), newest first."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    api_keys_table.c.id,
+                    api_keys_table.c.name,
+                    api_keys_table.c.prefix,
+                    api_keys_table.c.created_at,
+                    api_keys_table.c.last_used_at,
+                )
+                .where(api_keys_table.c.user_id == user_id)
+                .order_by(api_keys_table.c.created_at.desc())
+            ).all()
+        return [
+            {"id": r[0], "name": r[1], "prefix": r[2],
+             "created_at": r[3], "last_used_at": r[4]}
+            for r in rows
+        ]
+
+    def resolve_meta(self, plaintext: str) -> dict | None:
+        """Return {"id", "user_id"} for a presented key, or None if unknown.
+        Records last-used on a hit so keys show recent activity. Returning the
+        key id (not just the owner) lets callers rate-limit per individual key."""
+        if not plaintext:
+            return None
+        key_hash = _hash_key(plaintext.strip())
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(api_keys_table.c.id, api_keys_table.c.user_id).where(
+                    api_keys_table.c.key_hash == key_hash
+                )
+            ).first()
+            if row is None:
+                return None
+            conn.execute(
+                api_keys_table.update()
+                .where(api_keys_table.c.id == row[0])
+                .values(last_used_at=datetime.now(timezone.utc).isoformat())
+            )
+        return {"id": row[0], "user_id": row[1]}
+
+    def resolve(self, plaintext: str) -> str | None:
+        """Return just the owning user_id for a presented key, or None."""
+        meta = self.resolve_meta(plaintext)
+        return meta["user_id"] if meta else None
+
+    def delete(self, key_id: str, user_id: str) -> bool:
+        """Revoke a key. Scoped to its owner so one user cannot revoke another's."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                api_keys_table.delete().where(
+                    (api_keys_table.c.id == key_id)
+                    & (api_keys_table.c.user_id == user_id)
+                )
+            )
+        return bool(result.rowcount)
+
+    def delete_user(self, user_id: str) -> int:
+        """Revoke every key a user holds (used by data erasure). Returns count."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                api_keys_table.delete().where(api_keys_table.c.user_id == user_id)
+            )
+        return int(result.rowcount or 0)
+
+
+class IdempotencyStore:
+    """Remembers the response to an idempotent /authorize call so a retry with the
+    same Idempotency-Key returns the ORIGINAL verdict without screening (or
+    executing) the payment again. Persisted, so it survives a restart."""
+
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        init_db(engine)
+
+    @staticmethod
+    def _scope(user_id: str, key: str) -> str:
+        return f"{user_id}\x00{key[:200]}"
+
+    def get(self, user_id: str, key: str) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(idempotency_table.c.response_json).where(
+                    idempotency_table.c.scope == self._scope(user_id, key)
+                )
+            ).first()
+        return json.loads(row[0]) if row else None
+
+    def put(self, user_id: str, key: str, response: dict) -> None:
+        scope = self._scope(user_id, key)
+        payload = json.dumps(response)
+        created = datetime.now(timezone.utc).isoformat()
+        with self.engine.begin() as conn:
+            exists = conn.execute(
+                select(idempotency_table.c.scope).where(
+                    idempotency_table.c.scope == scope
+                )
+            ).first()
+            if exists:
+                return  # first write wins; never overwrite a recorded response
+            conn.execute(
+                idempotency_table.insert().values(
+                    scope=scope, user_id=user_id,
+                    response_json=payload, created_at=created,
+                )
+            )
+
+    def delete_user(self, user_id: str) -> int:
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                idempotency_table.delete().where(
+                    idempotency_table.c.user_id == user_id
+                )
+            )
+        return int(result.rowcount or 0)

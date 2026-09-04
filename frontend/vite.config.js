@@ -14,6 +14,7 @@ export default defineConfig({
       '/confirm': api,
       '/simulate': api,
       '/policy': api,
+      '/keys': api,
       '/profile': api,
       '/audit': api,
       '/pending': api,
