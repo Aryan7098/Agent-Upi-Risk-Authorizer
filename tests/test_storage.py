@@ -3,8 +3,20 @@ import json
 
 from sqlalchemy import select
 
-from firewall.models import Decision, DecisionRecord, EngineResult, UserPolicy
-from firewall.storage import DbPolicyStore, SqlAuditLog, audit_table, make_engine
+from firewall.models import (
+    AuthorizationRequest,
+    Decision,
+    DecisionRecord,
+    EngineResult,
+    UserPolicy,
+)
+from firewall.storage import (
+    DbPolicyStore,
+    PendingStore,
+    SqlAuditLog,
+    audit_table,
+    make_engine,
+)
 
 
 def test_policy_roundtrip(tmp_path):
@@ -108,3 +120,45 @@ def test_sql_audit_spend_and_velocity(tmp_path):
     since = datetime.now(timezone.utc) - timedelta(days=1)
     assert log.total_spent_paise("u1", since) == 30000
     assert log.txn_count("u1", since) == 2
+
+
+# --- Phase 6C: pending step-ups -------------------------------------------
+
+def _pending_req(rid="req_x"):
+    r = AuthorizationRequest(
+        agent_id="a1", user_id="u1", amount_rupees="750.00",
+        merchant="MysteryMart", category="groceries", user_intent="snacks",
+    )
+    r.request_id = rid
+    return r
+
+
+def test_pending_put_pop_roundtrip(tmp_path):
+    store = PendingStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    store.put(_pending_req("req_x"))
+    got = store.pop("req_x")
+    assert got is not None
+    assert got.request_id == "req_x"
+    assert got.amount_paise == 75000
+    assert got.merchant == "MysteryMart"
+
+
+def test_pending_pop_removes(tmp_path):
+    store = PendingStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    store.put(_pending_req("req_x"))
+    assert store.pop("req_x") is not None
+    assert store.pop("req_x") is None  # gone after first pop
+
+
+def test_pending_unknown_returns_none(tmp_path):
+    store = PendingStore(make_engine(f"sqlite:///{tmp_path / 'aura.db'}"))
+    assert store.pop("nope") is None
+
+
+def test_pending_survives_restart(tmp_path):
+    url = f"sqlite:///{tmp_path / 'aura.db'}"
+    PendingStore(make_engine(url)).put(_pending_req("req_x"))
+    # Fresh store on the same DB (simulated restart) still has it.
+    reopened = PendingStore(make_engine(url))
+    got = reopened.pop("req_x")
+    assert got is not None and got.request_id == "req_x"

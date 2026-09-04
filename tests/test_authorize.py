@@ -12,16 +12,16 @@ from fastapi.testclient import TestClient
 import api.main as main
 from firewall.models import Decision
 from firewall.rail import OrderResult, RailError
-from firewall.storage import DbPolicyStore, SqlAuditLog, make_engine
+from firewall.storage import DbPolicyStore, PendingStore, SqlAuditLog, make_engine
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    # Isolate audit log + per-user policy in one temp database; reset pending.
+    # Isolate audit log + per-user policy + pending step-ups in one temp database.
     eng = make_engine(f"sqlite:///{tmp_path / 'aura_test.db'}")
     monkeypatch.setattr(main, "audit", SqlAuditLog(eng))
     monkeypatch.setattr(main, "policy_store", DbPolicyStore(eng))
-    monkeypatch.setattr(main, "_pending", {})
+    monkeypatch.setattr(main, "pending_store", PendingStore(eng))
     # These tests focus on rules/step-up, not ML or the LLM; disable both so they
     # stay deterministic and never hit the network. Those layers have their own
     # dedicated tests.

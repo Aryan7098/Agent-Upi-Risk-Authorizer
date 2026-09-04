@@ -25,7 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 
 from firewall.audit import _AuditBase, _canonical
-from firewall.models import UserPolicy
+from firewall.models import AuthorizationRequest, UserPolicy
 
 metadata = MetaData()
 
@@ -51,6 +51,16 @@ audit_table = Table(
     Column("entry_hash", String),
     Column("prev_hash", String),
     Column("entry_json", Text, nullable=False),
+)
+
+# Payments held awaiting human step-up confirmation. Persisted so a held payment
+# survives a restart and can still be confirmed later.
+pending_table = Table(
+    "pending_step_ups",
+    metadata,
+    Column("request_id", String, primary_key=True),
+    Column("request_json", Text, nullable=False),
+    Column("created_at", String),
 )
 
 
@@ -135,3 +145,42 @@ class SqlAuditLog(_AuditBase):
                     entry_json=_canonical(entry),
                 )
             )
+
+
+class PendingStore:
+    """Held step-up payments, persisted so they survive a restart."""
+
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        init_db(engine)
+
+    def put(self, request: AuthorizationRequest) -> None:
+        payload = json.dumps(request.model_dump(mode="json"))
+        with self.engine.begin() as conn:
+            conn.execute(
+                pending_table.delete().where(
+                    pending_table.c.request_id == request.request_id
+                )
+            )
+            conn.execute(
+                pending_table.insert().values(
+                    request_id=request.request_id,
+                    request_json=payload,
+                    created_at=request.timestamp,
+                )
+            )
+
+    def pop(self, request_id: str) -> AuthorizationRequest | None:
+        """Return and remove the held request, or None if not found."""
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(pending_table.c.request_json).where(
+                    pending_table.c.request_id == request_id
+                )
+            ).first()
+            if row is None:
+                return None
+            conn.execute(
+                pending_table.delete().where(pending_table.c.request_id == request_id)
+            )
+        return AuthorizationRequest(**json.loads(row[0]))

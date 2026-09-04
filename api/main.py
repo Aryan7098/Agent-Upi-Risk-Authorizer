@@ -32,7 +32,7 @@ from firewall.money import paise_to_rupees
 from firewall.policy import DeterministicPolicyEngine
 from firewall.rail import RailError, RazorpayRail
 from firewall.risk import RiskModel
-from firewall.storage import DbPolicyStore, SqlAuditLog, make_engine
+from firewall.storage import DbPolicyStore, PendingStore, SqlAuditLog, make_engine
 
 app = FastAPI(
     title="AURA — Agent UPI Risk Authorizer",
@@ -58,8 +58,9 @@ risk_model = RiskModel()
 DEFAULT_POLICY = UserPolicy()
 policy_store = DbPolicyStore(db_engine)  # shares the same database as the audit log
 
-# Requests held pending a human step-up confirmation (in-memory until 6C).
-_pending: dict[str, AuthorizationRequest] = {}
+# Requests held pending a human step-up confirmation — persisted, so a held
+# payment survives a restart and can still be confirmed later.
+pending_store = PendingStore(db_engine)
 
 
 def get_policy(user_id: str) -> UserPolicy:
@@ -175,8 +176,8 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
     if final is Decision.ALLOW:
         _execute_on_rail(record, request)
     elif final is Decision.STEP_UP:
-        # Hold the money action pending human confirmation.
-        _pending[request.request_id] = request
+        # Hold the money action pending human confirmation (persisted).
+        pending_store.put(request)
         record.reasons.append("held pending human confirmation (POST /confirm/{request_id})")
     # BLOCK: do nothing (no money action).
 
@@ -191,7 +192,7 @@ def confirm(request_id: str, remember: bool = False) -> AuthorizeResponse:
 
     Pass `?remember=true` to also add this merchant to the user's allowlist, so
     future payments to it are allowed without another step-up."""
-    request = _pending.pop(request_id, None)
+    request = pending_store.pop(request_id)
     if request is None:
         raise HTTPException(status_code=404, detail="no pending step-up for this request_id")
 
