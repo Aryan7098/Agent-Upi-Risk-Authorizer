@@ -11,8 +11,9 @@ razorpay>=1.4
 scikit-learn>=1.4
 numpy>=1.26
 
-# Persistence (SQLite locally; Postgres-ready via DATABASE_URL)
+# Persistence (SQLite locally; Postgres in prod via DATABASE_URL)
 SQLAlchemy>=2.0
+psycopg[binary]>=3.1  # Postgres driver (used when DATABASE_URL points at Postgres)
 
 # Tests
 pytest>=8.0

@@ -1,0 +1,36 @@
+# Render Blueprint — one Docker web service + a managed Postgres.
+# Deploy: push to GitHub, then in Render pick "New +" -> "Blueprint" and select
+# this repo. Fill the secret env vars (marked sync:false) in the dashboard.
+services:
+  - type: web
+    name: aura
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: GEMINI_MODEL
+        value: gemini-flash-lite-latest
+      # Optional: baked into the frontend at build time to enable Clerk auth.
+      - key: VITE_CLERK_PUBLISHABLE_KEY
+        sync: false
+      # Injected from the managed database below.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aura-db
+          property: connectionString
+
+databases:
+  - name: aura-db
+    plan: free

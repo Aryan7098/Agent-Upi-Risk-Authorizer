@@ -66,8 +66,13 @@ pending_table = Table(
 
 def make_engine(url: str | None = None) -> Engine:
     """Create a SQLAlchemy engine. Defaults to a local SQLite file; override with
-    DATABASE_URL (e.g. postgresql+psycopg://... in production)."""
+    DATABASE_URL. Managed hosts (Render/Neon/Heroku) hand out `postgres://` or
+    `postgresql://` URLs — normalize both to the psycopg (v3) driver."""
     url = url or os.getenv("DATABASE_URL", "sqlite:///./aura.db")
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     return create_engine(url, connect_args=connect_args, future=True)
 
