@@ -27,8 +27,8 @@ const NAV = [
   { id: 'overview', label: 'Overview' },
   { id: 'simulate', label: 'Simulate' },
   { id: 'decisions', label: 'Decisions' },
-  { id: 'policy', label: 'Policy', soon: '7C' },
-  { id: 'pending', label: 'Pending', soon: '7C' },
+  { id: 'policy', label: 'Policy' },
+  { id: 'pending', label: 'Pending' },
 ]
 
 const rupeesStr = (r) =>
@@ -640,18 +640,213 @@ function Decisions({ decisions, integrity, onVerify, loaded, flashId }) {
   )
 }
 
-function Arriving({ tab }) {
-  const copy = {
-    simulate: 'Send an agent payment intent and watch AURA clear, hold, or deny it — with the rules, risk, and AI reasons.',
-    decisions: 'The full ledger with filters and integrity checks.',
-    policy: 'Set your caps, velocity limits, and allow / deny lists.',
-    pending: 'Approve payments AURA is holding for you.',
-  }
+// --- Policy editor -----------------------------------------------------------
+function TagInput({ label, hint, values, onChange, placeholder }) {
+  const [draft, setDraft] = useState('')
+  const add = (v) => { v = v.trim(); if (v && !values.includes(v)) onChange([...values, v]); setDraft('') }
   return (
-    <div className="border-l-2 border-line pl-4 py-6">
-      <p className="text-paper">{copy[tab]}</p>
-      <p className="mt-1 text-sm text-mute">Arriving in checkpoint {['policy', 'pending'].includes(tab) ? '7C' : '7B'}.</p>
+    <div>
+      <span className="eyebrow">{label}</span>
+      {hint && <span className="ml-2 text-[11px] text-mute">{hint}</span>}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 rounded-md border border-line bg-slab/60 px-2.5 py-2 transition-colors focus-within:border-mute">
+        {values.map((v) => (
+          <span key={v} className="inline-flex items-center gap-1 rounded bg-slab px-2 py-0.5 text-xs text-paper">
+            {v}
+            <button type="button" onClick={() => onChange(values.filter((x) => x !== v))} className="text-mute hover:text-denied">×</button>
+          </span>
+        ))}
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add(draft) } }}
+          onBlur={() => add(draft)}
+          placeholder={values.length ? '' : placeholder}
+          className="min-w-[6rem] flex-1 bg-transparent text-sm text-paper outline-none placeholder-mute/60"
+        />
+      </div>
     </div>
+  )
+}
+
+const CAP_FIELDS = [
+  ['per_txn_cap', 'Per transaction (₹)', 'required'],
+  ['daily_cap', 'Daily cap (₹)', 'blank = no limit'],
+  ['monthly_cap', 'Monthly cap (₹)', 'blank = no limit'],
+]
+const VEL_FIELDS = [
+  ['max_txns_per_hour', 'Max / hour', 'blank = no limit'],
+  ['max_txns_per_day', 'Max / day', 'blank = no limit'],
+]
+
+function normalizePolicy(p) {
+  return {
+    per_txn_cap: p.per_txn_cap ?? '',
+    daily_cap: p.daily_cap ?? '',
+    monthly_cap: p.monthly_cap ?? '',
+    max_txns_per_hour: p.max_txns_per_hour ?? '',
+    max_txns_per_day: p.max_txns_per_day ?? '',
+    merchant_allowlist: p.merchant_allowlist ?? [],
+    merchant_denylist: p.merchant_denylist ?? [],
+    category_allowlist: p.category_allowlist ?? [],
+  }
+}
+
+function Policy() {
+  const [userId, setUserId] = useState('u_demo')
+  const [loadedId, setLoadedId] = useState('u_demo')
+  const [p, setP] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [err, setErr] = useState(null)
+
+  async function fetchPolicy(uid) {
+    setLoading(true); setErr(null); setMsg(null)
+    try { const r = await api(`/policy/${encodeURIComponent(uid)}`); setP(normalizePolicy(r.policy)); setLoadedId(uid) }
+    catch (e) { setErr(e.message) }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { fetchPolicy('u_demo') }, [])
+
+  const setCap = (k) => (e) => { setP((s) => ({ ...s, [k]: e.target.value })); setMsg(null) }
+
+  async function save(e) {
+    e.preventDefault()
+    setErr(null); setMsg(null)
+    if (!p.per_txn_cap || Number(p.per_txn_cap) <= 0) { setErr('Per-transaction cap is required and must be greater than 0.'); return }
+    setBusy(true)
+    try {
+      const body = {
+        per_txn_cap: String(p.per_txn_cap),
+        daily_cap: p.daily_cap === '' ? null : String(p.daily_cap),
+        monthly_cap: p.monthly_cap === '' ? null : String(p.monthly_cap),
+        max_txns_per_hour: p.max_txns_per_hour === '' ? null : Number(p.max_txns_per_hour),
+        max_txns_per_day: p.max_txns_per_day === '' ? null : Number(p.max_txns_per_day),
+        merchant_allowlist: p.merchant_allowlist,
+        merchant_denylist: p.merchant_denylist,
+        category_allowlist: p.category_allowlist,
+      }
+      await api(`/policy/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify(body) })
+      setMsg(`Saved policy for ${userId}.`)
+    } catch (e) { setErr(e.message) }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <section>
+      <h2 className="head">Policy — the hard floor</h2>
+      <p className="mt-1.5 pl-[13px] text-xs text-mute">Caps and lists the deterministic engine enforces before any AI runs. The AI can only make a verdict stricter, never looser.</p>
+
+      <div className="mt-4 flex flex-wrap items-end gap-2">
+        <label className="block">
+          <span className="eyebrow">User</span>
+          <input className="field mt-1.5 w-48" value={userId} onChange={(e) => setUserId(e.target.value)} />
+        </label>
+        <button onClick={() => fetchPolicy(userId)} className="btn-line">Load</button>
+        {loadedId && <span className="pb-2 text-xs text-mute">editing <span className="text-paper">{loadedId}</span></span>}
+      </div>
+
+      {loading || !p ? (
+        <div className="mt-5 grid gap-4 lg:grid-cols-2">
+          <div className="panel p-5"><div className="sk h-40 w-full" /></div>
+          <div className="panel p-5"><div className="sk h-40 w-full" /></div>
+        </div>
+      ) : (
+        <form onSubmit={save} className="mt-5 grid gap-4 lg:grid-cols-2">
+          <div className="panel space-y-4 p-5">
+            <h3 className="text-sm font-semibold text-paper">Spending caps</h3>
+            <div className="grid grid-cols-3 gap-3">
+              {CAP_FIELDS.map(([k, label, hint]) => (
+                <label key={k} className="block">
+                  <span className="eyebrow">{label}</span>
+                  <input className="field mt-1.5 tnum" inputMode="decimal" value={p[k]} onChange={setCap(k)} placeholder={hint} />
+                  <span className="mt-1 block text-[10px] text-mute">{hint}</span>
+                </label>
+              ))}
+            </div>
+            <h3 className="pt-2 text-sm font-semibold text-paper">Velocity</h3>
+            <div className="grid grid-cols-2 gap-3">
+              {VEL_FIELDS.map(([k, label, hint]) => (
+                <label key={k} className="block">
+                  <span className="eyebrow">{label}</span>
+                  <input className="field mt-1.5 tnum" inputMode="numeric" value={p[k]} onChange={setCap(k)} placeholder={hint} />
+                  <span className="mt-1 block text-[10px] text-mute">{hint}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel space-y-4 p-5">
+            <h3 className="text-sm font-semibold text-paper">Lists</h3>
+            <TagInput label="Trusted merchants" hint="always allowed" values={p.merchant_allowlist} onChange={(v) => setP((s) => ({ ...s, merchant_allowlist: v }))} placeholder="add a merchant + Enter" />
+            <TagInput label="Blocked merchants" hint="always denied" values={p.merchant_denylist} onChange={(v) => setP((s) => ({ ...s, merchant_denylist: v }))} placeholder="add a merchant + Enter" />
+            <TagInput label="Allowed categories" hint="blank = all allowed" values={p.category_allowlist} onChange={(v) => setP((s) => ({ ...s, category_allowlist: v }))} placeholder="e.g. food, transport" />
+          </div>
+
+          <div className="flex items-center gap-3 lg:col-span-2">
+            <button type="submit" disabled={busy} className="btn-solid">{busy ? 'Saving…' : 'Save policy'}</button>
+            {msg && <span className="text-sm text-cleared">{msg}</span>}
+            {err && <span className="text-sm text-denied">{err}</span>}
+          </div>
+        </form>
+      )}
+    </section>
+  )
+}
+
+// --- Pending confirmations ---------------------------------------------------
+function Pending({ pending, loaded, onChange }) {
+  const [busy, setBusy] = useState(null)
+  const [err, setErr] = useState(null)
+
+  async function approve(id, remember) {
+    setBusy(id + remember); setErr(null)
+    try { await api(`/confirm/${encodeURIComponent(id)}?remember=${remember}`, { method: 'POST' }); await onChange?.() }
+    catch (e) { setErr(e.message) }
+    finally { setBusy(null) }
+  }
+
+  return (
+    <section>
+      <h2 className="head">Pending confirmations
+        {pending.length > 0 && <span className="rounded-full bg-held/15 px-2 py-0.5 text-[11px] font-medium text-held">{pending.length} held</span>}
+      </h2>
+      <p className="mt-1.5 pl-[13px] text-xs text-mute">Payments AURA stepped up. They execute only when you approve them here.</p>
+      {err && <p className="mt-3 text-sm text-denied">{err}</p>}
+
+      {!loaded ? (
+        <div className="mt-5 space-y-3">{[0, 1].map((i) => <div key={i} className="panel p-5"><div className="sk h-16 w-full" /></div>)}</div>
+      ) : pending.length === 0 ? (
+        <div className="panel mt-5 grid min-h-[10rem] place-items-center p-6 text-center">
+          <p className="text-sm text-mute">Nothing waiting. Held payments will appear here for approval.</p>
+        </div>
+      ) : (
+        <div className="mt-5 space-y-3">
+          {pending.map((r) => (
+            <div key={r.request_id} className="panel row-rise flex flex-wrap items-center justify-between gap-4 p-5">
+              <div>
+                <div className="flex items-baseline gap-3">
+                  <span className="text-xl font-bold tnum text-paper">{rupees(r.amount_paise)}</span>
+                  <span className="text-sm text-paper">to {r.merchant || '—'}</span>
+                  <span className="stamp-held text-xs">STEP-UP</span>
+                </div>
+                <div className="mt-1.5 text-xs text-mute">
+                  {r.user_intent ? <>“{r.user_intent}” · </> : null}{r.category || 'uncategorised'} · {r.user_id} · {clock(r.timestamp)}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => approve(r.request_id, true)} disabled={busy} className="btn-line">
+                  {busy === r.request_id + true ? '…' : 'Approve & remember'}
+                </button>
+                <button onClick={() => approve(r.request_id, false)} disabled={busy} className="btn-solid">
+                  {busy === r.request_id + false ? '…' : 'Approve'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -660,6 +855,7 @@ export default function App() {
   const [health, setHealth] = useState(null)
   const [integrity, setIntegrity] = useState(null)
   const [decisions, setDecisions] = useState([])
+  const [pending, setPending] = useState([])
   const [error, setError] = useState(null)
   const [loaded, setLoaded] = useState(false)
   const [flashId, setFlashId] = useState(null)
@@ -670,8 +866,8 @@ export default function App() {
 
   async function load() {
     try {
-      const [h, v, r] = await Promise.all([api('/health'), api('/audit/verify'), api('/audit/recent?limit=60')])
-      setHealth(h); setIntegrity(v); setDecisions(r.decisions || []); setError(null)
+      const [h, v, r, p] = await Promise.all([api('/health'), api('/audit/verify'), api('/audit/recent?limit=60'), api('/pending')])
+      setHealth(h); setIntegrity(v); setDecisions(r.decisions || []); setPending(p.pending || []); setError(null)
     } catch (e) { setError(e.message) }
     finally { setLoaded(true) }
   }
@@ -737,7 +933,9 @@ export default function App() {
                 >
                   <span className={`w-[2px] rounded-full transition-all duration-200 ${active ? 'h-4 bg-paper' : 'h-1.5 bg-transparent group-hover:h-4 group-hover:bg-mute'}`} />
                   <span>{n.label}</span>
-                  {n.soon && <span className="ml-auto text-[9px] text-mute/50 transition-opacity group-hover:text-mute">{n.soon}</span>}
+                  {n.id === 'pending' && pending.length > 0 && (
+                    <span className="ml-auto grid h-4 min-w-4 place-items-center rounded-full bg-held px-1 text-[9px] font-bold text-ink">{pending.length}</span>
+                  )}
                 </button>
               )
             })}
@@ -759,8 +957,10 @@ export default function App() {
               <Simulate onDone={load} />
             ) : tab === 'decisions' ? (
               <Decisions decisions={decisions} integrity={integrity} onVerify={load} flashId={flashId} loaded={loaded} />
+            ) : tab === 'policy' ? (
+              <Policy />
             ) : (
-              <Arriving tab={tab} />
+              <Pending pending={pending} loaded={loaded} onChange={load} />
             )}
           </div>
         </div>
