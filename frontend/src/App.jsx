@@ -32,7 +32,7 @@ const NAV = [
   { id: 'policy', label: 'Policy' },
   { id: 'simulate', label: 'Payments' },
   { id: 'pending', label: 'Pending' },
-  { id: 'decisions', label: 'Decisions' },
+  { id: 'decisions', label: 'Ledger' },
 ]
 
 const V_LABEL = { ALLOW: 'Cleared', STEP_UP: 'Step-up', BLOCK: 'Blocked' }
@@ -52,6 +52,24 @@ function Verdict({ d, className = '' }) {
 const clock = (ts) => {
   try { return new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) }
   catch { return '—' }
+}
+
+// "Today" / "Yesterday" / "12 Sep" for ledger day separators.
+function dayLabel(ts) {
+  try {
+    const d = new Date(ts), now = new Date()
+    const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate())
+    const diff = Math.round((startOf(now) - startOf(d)) / 86400000)
+    if (diff === 0) return 'Today'
+    if (diff === 1) return 'Yesterday'
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
+  } catch { return '' }
+}
+
+// A number that rolls to its target when it changes (reuses useCountUp).
+function CountNum({ value, format }) {
+  const n = useCountUp(value)
+  return <>{format ? format(n) : n}</>
 }
 
 function StatusLine({ health, integrity }) {
@@ -123,24 +141,31 @@ function Signals({ d }) {
 }
 
 // --- Overview: KPIs ----------------------------------------------------------
-function Metrics({ s }) {
+function Metrics({ s, order, setOrder, onNav }) {
   const flaggedRate = s.total ? Math.round(((s.STEP_UP + s.BLOCK) / s.total) * 100) : 0
-  const cells = [
-    { label: 'Screened', value: s.total, sub: 'payment intents' },
-    { label: 'Cleared', value: s.ALLOW, sub: `${rupees(s.cleared_paise)} · ${s.executed} on rail` },
-    { label: 'Held / denied', value: s.STEP_UP + s.BLOCK, sub: `${flaggedRate}% flagged` },
-    { label: 'Value stopped', value: rupees(s.flagged_paise), sub: 'held or denied' },
-  ]
+  const cellMap = {
+    screened: { label: 'Screened', value: s.total, sub: 'payment intents', to: 'decisions' },
+    cleared: { label: 'Cleared', value: s.ALLOW, sub: `${rupees(s.cleared_paise)} · ${s.executed} on rail`, to: 'decisions' },
+    held: { label: 'Held / denied', value: s.STEP_UP + s.BLOCK, sub: `${flaggedRate}% flagged`, to: 'pending' },
+    stopped: { label: 'Value stopped', value: s.flagged_paise, format: rupees, sub: 'held or denied', to: 'pending' },
+  }
   return (
     <section>
-      <div className="grid grid-cols-2 rounded-lg border border-line sm:grid-cols-4">
-        {cells.map((c, i) => (
-          <div key={c.label} className={`px-5 py-4 ${i % 2 !== 0 ? 'border-l border-line' : ''} ${i % 4 !== 0 ? 'sm:border-l sm:border-line' : ''} ${i >= 2 ? 'border-t border-line sm:border-t-0' : ''}`}>
-            <div className="eyebrow">{c.label}</div>
-            <div className="mono mt-2 text-[26px] font-semibold leading-none tracking-tight tnum text-paper">{c.value}</div>
-            <div className="mt-2 text-xs text-faint">{c.sub}</div>
-          </div>
-        ))}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {order.map((key) => {
+          const c = cellMap[key]
+          return (
+            <DragCard key={key} id={key} order={order} setOrder={setOrder}>
+              <div onClick={() => onNav(c.to)} className="panel h-full p-4">
+                <div className="eyebrow">{c.label}</div>
+                <div className="mono mt-2 text-[26px] font-semibold leading-none tracking-tight tnum text-paper">
+                  <CountNum value={c.value} format={c.format} />
+                </div>
+                <div className="mt-2 text-xs text-faint">{c.sub}</div>
+              </div>
+            </DragCard>
+          )
+        })}
       </div>
 
       {s.total > 0 && (
@@ -161,7 +186,7 @@ function Metrics({ s }) {
 }
 
 // --- Overview: latest decision ----------------------------------------------
-function Hero({ d, loaded }) {
+function Hero({ d, loaded, onOpen }) {
   const amount = useCountUp(d?.amount_paise || 0)
   if (!loaded) {
     return (
@@ -182,7 +207,7 @@ function Hero({ d, loaded }) {
   }
   const reasons = (d.reasons || []).filter((r) => !r.startsWith('held pending'))
   return (
-    <section key={d.request_id} className="panel row-rise p-6">
+    <section key={d.request_id} onClick={onOpen} className="panel row-rise p-6">
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-2">
           <i className="live-dot h-1.5 w-1.5 rounded-full bg-cleared" />
@@ -211,12 +236,15 @@ function Hero({ d, loaded }) {
 }
 
 // --- Overview: breakdown + system -------------------------------------------
-function CaughtBy({ s }) {
+function CaughtBy({ s, onOpen }) {
   const flagged = s.STEP_UP + s.BLOCK
   const rows = [['Rules', s.by.rules], ['Risk model', s.by['risk model']], ['AI judge', s.by['AI judge']]]
   return (
-    <section className="panel p-5">
-      <h2 className="head">What's catching payments</h2>
+    <section onClick={onOpen} className="panel h-full p-5">
+      <h2 className="head">
+        <span className="inline-block origin-left transition-transform duration-200 group-hover:scale-[1.06]">What's catching payments</span>
+        {onOpen && <span className="ml-auto text-faint transition-transform duration-200 group-hover:translate-x-1">→</span>}
+      </h2>
       <p className="mt-2 text-xs text-faint">Which layer drove each held or blocked verdict.</p>
       {flagged === 0 ? (
         <p className="mt-6 text-sm text-mute">Nothing flagged — every payment cleared.</p>
@@ -246,7 +274,7 @@ function SystemPanel({ health, integrity, s }) {
   ]
   const railRate = s.ALLOW ? Math.round((s.executed / s.ALLOW) * 100) : 0
   return (
-    <section className="panel p-5">
+    <section className="panel h-full p-5">
       <h2 className="head">System &amp; integrity</h2>
       <p className="mt-2 text-xs text-faint">Every decision is hash-chained and tamper-evident.</p>
       <div className="mt-4">
@@ -291,16 +319,18 @@ function PendingBanner({ count, onReview }) {
 }
 
 // --- Overview: ledger --------------------------------------------------------
-function Ledger({ decisions, integrity, onVerify, flashId, loaded, updatedAt }) {
+function Ledger({ decisions, integrity, onVerify, flashId, loaded, updatedAt, onOpen }) {
   return (
     <section>
       <div className="mb-3 flex items-baseline justify-between">
-        <h2 className="head">Ledger
+        <button onClick={onOpen} className="head group press -m-1 rounded p-1 text-left hover:text-paper">
+          <span className="inline-block origin-left transition-transform duration-200 group-hover:scale-[1.06]">Recent decisions</span>
           <span className="flex items-center gap-1 text-[10px] font-medium text-faint"><i className="live-dot h-1.5 w-1.5 rounded-full bg-cleared" />live</span>
-        </h2>
+          <span className="text-faint transition-transform duration-200 group-hover:translate-x-1">→</span>
+        </button>
         <div className="flex items-center gap-3 text-xs">
           <UpdatedAgo at={updatedAt} />
-          <button onClick={onVerify} className="press text-faint hover:text-paper">
+          <button onClick={(e) => { e.stopPropagation(); onVerify() }} className="press text-faint hover:text-paper">
             {integrity ? (integrity.valid ? `sealed · ${integrity.entries} entries` : 'chain broken') : 'verify'}
           </button>
         </div>
@@ -322,15 +352,31 @@ function Ledger({ decisions, integrity, onVerify, flashId, loaded, updatedAt }) 
               </tr>
             </thead>
             <tbody>
-              {decisions.map((d) => (
-                <tr key={d.request_id} className={`border-t border-line/70 transition-colors hover:bg-slab2 ${d.request_id === flashId ? 'row-rise' : ''}`}>
-                  <td className="mono px-5 py-3 tnum text-faint">{clock(d.timestamp)}</td>
-                  <td className="py-3 pr-4 text-paper">{d.merchant || '—'}</td>
-                  <td className="mono py-3 pr-4 text-right tnum text-paper">{rupees(d.amount_paise)}</td>
-                  <td className="seal hidden py-3 pr-4 text-faint sm:table-cell">{(d.entry_hash || '').slice(0, 8)}</td>
-                  <td className="py-3 pr-5 text-right"><Verdict d={d.decision} className="justify-end text-xs" /></td>
-                </tr>
-              ))}
+              {(() => {
+                const rows = []
+                let lastDay = null, first = true
+                for (const d of decisions) {
+                  const label = dayLabel(d.timestamp)
+                  if (label !== lastDay) {
+                    rows.push(
+                      <tr key={`sep-${d.request_id}`}>
+                        <td colSpan={5} className={`eyebrow bg-ink/40 px-5 py-1.5 ${first ? '' : 'border-t border-line'}`}>{label}</td>
+                      </tr>
+                    )
+                    lastDay = label; first = false
+                  }
+                  rows.push(
+                    <tr key={d.request_id} onClick={onOpen} className={`border-t border-line/70 transition-colors hover:bg-slab2 ${onOpen ? 'cursor-pointer' : ''} ${d.request_id === flashId ? 'row-rise' : ''}`}>
+                      <td className="mono px-5 py-3 tnum text-faint">{clock(d.timestamp)}</td>
+                      <td className="py-3 pr-4 text-paper">{d.merchant || '—'}</td>
+                      <td className="mono py-3 pr-4 text-right tnum text-paper">{rupees(d.amount_paise)}</td>
+                      <td className="seal hidden py-3 pr-4 text-faint sm:table-cell">{(d.entry_hash || '').slice(0, 8)}</td>
+                      <td className="py-3 pr-5 text-right"><Verdict d={d.decision} className="justify-end text-xs" /></td>
+                    </tr>
+                  )
+                }
+                return rows
+              })()}
             </tbody>
           </table>
         </div>
@@ -507,7 +553,7 @@ function Decisions({ decisions, integrity, onVerify, loaded, user }) {
   return (
     <section>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="head">Decision ledger
+        <h2 className="head">Ledger
           <span className="flex items-center gap-1 text-[10px] font-medium text-faint"><i className="live-dot h-1.5 w-1.5 rounded-full bg-cleared" />live</span>
         </h2>
         <button onClick={onVerify} className="press text-xs text-faint hover:text-paper">
@@ -732,6 +778,46 @@ function Pending({ pending, loaded, onChange }) {
   )
 }
 
+// Remembers a card order in localStorage across refreshes.
+function usePersistedOrder(key, initial) {
+  const [order, setOrder] = useState(() => {
+    try { const s = JSON.parse(localStorage.getItem(key)); if (Array.isArray(s) && s.length === initial.length) return s } catch { /* ignore */ }
+    return initial
+  })
+  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(order)) } catch { /* ignore */ } }, [key, order])
+  return [order, setOrder]
+}
+
+// A draggable card that swaps places with another on drop. Clicking still works
+// (a click without a drag), so the card's own action is preserved.
+function DragCard({ id, order, setOrder, className = '', children }) {
+  const [dragging, setDragging] = useState(false)
+  const [over, setOver] = useState(false)
+  function swapWith(from) {
+    if (!from || from === id) return
+    const next = [...order]
+    const fi = next.indexOf(from), ti = next.indexOf(id)
+    if (fi < 0 || ti < 0) return
+    ;[next[fi], next[ti]] = [next[ti], next[fi]]
+    setOrder(next)
+  }
+  return (
+    <div
+      draggable
+      onDragStart={(e) => { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; setDragging(true) }}
+      onDragEnd={() => setDragging(false)}
+      onDragOver={(e) => { e.preventDefault(); setOver(true) }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => { e.preventDefault(); setOver(false); swapWith(e.dataTransfer.getData('text/plain')) }}
+      className={`group cursor-grab rounded-lg transition-[transform,box-shadow,opacity] duration-200 active:cursor-grabbing
+        hover:-translate-y-1 hover:shadow-[0_16px_34px_-16px_rgba(0,0,0,0.85)]
+        ${dragging ? 'opacity-40' : ''} ${over ? 'ring-1 ring-mute/50' : ''} ${className}`}
+    >
+      {children}
+    </div>
+  )
+}
+
 // --- Dashboard ---------------------------------------------------------------
 function Dashboard({ user, onLogout }) {
   const [tab, setTab] = useState('overview')
@@ -743,6 +829,9 @@ function Dashboard({ user, onLogout }) {
   const [loaded, setLoaded] = useState(false)
   const [flashId, setFlashId] = useState(null)
   const [updatedAt, setUpdatedAt] = useState(null)
+  const [kpiOrder, setKpiOrder] = usePersistedOrder('aura_kpi_order', ['screened', 'cleared', 'held', 'stopped'])
+  const [midOrder, setMidOrder] = usePersistedOrder('aura_mid_order', ['caught', 'system'])
+  const [bigOrder, setBigOrder] = usePersistedOrder('aura_big_order', ['hero', 'ledger'])
   const topRef = useRef(null)
   const firstRef = useRef(true)
 
@@ -775,6 +864,12 @@ function Dashboard({ user, onLogout }) {
   }, [decisions])
 
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }) }, [tab])
+
+  // The two swappable full-width sections on the overview.
+  const bigCards = {
+    hero: <Hero d={decisions[0]} loaded={loaded} onOpen={() => setTab('decisions')} />,
+    ledger: <Ledger decisions={decisions} integrity={integrity} onVerify={load} flashId={flashId} loaded={loaded} updatedAt={updatedAt} onOpen={() => setTab('decisions')} />,
+  }
 
   return (
     <div className="min-h-screen">
@@ -822,13 +917,18 @@ function Dashboard({ user, onLogout }) {
             {tab === 'overview' ? (
               <div className="space-y-10">
                 <PendingBanner count={pending.length} onReview={() => setTab('pending')} />
-                <Metrics s={summary} />
-                <Hero d={decisions[0]} loaded={loaded} />
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <CaughtBy s={summary} />
-                  <SystemPanel health={health} integrity={integrity} s={summary} />
+                <Metrics s={summary} order={kpiOrder} setOrder={setKpiOrder} onNav={setTab} />
+                <DragCard id={bigOrder[0]} order={bigOrder} setOrder={setBigOrder}>{bigCards[bigOrder[0]]}</DragCard>
+                <div className="grid items-stretch gap-6 lg:grid-cols-2">
+                  {midOrder.map((key) => (
+                    <DragCard key={key} id={key} order={midOrder} setOrder={setMidOrder}>
+                      {key === 'caught'
+                        ? <CaughtBy s={summary} onOpen={() => setTab('pending')} />
+                        : <SystemPanel health={health} integrity={integrity} s={summary} />}
+                    </DragCard>
+                  ))}
                 </div>
-                <Ledger decisions={decisions} integrity={integrity} onVerify={load} flashId={flashId} loaded={loaded} updatedAt={updatedAt} />
+                <DragCard id={bigOrder[1]} order={bigOrder} setOrder={setBigOrder}>{bigCards[bigOrder[1]]}</DragCard>
               </div>
             ) : tab === 'simulate' ? (
               <Simulate onDone={load} user={user} onGoPending={() => setTab('pending')} />
