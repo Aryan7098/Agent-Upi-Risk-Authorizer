@@ -18,6 +18,10 @@ __pycache__/
 *.jsonl
 *.db
 
+# Node / frontend build
+node_modules/
+dist/
+
 # OS / editor
 .DS_Store
 .idea/

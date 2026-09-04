@@ -143,6 +143,7 @@ class DecisionRecord(BaseModel):
 
     request_id: str
     user_id: str = ""
+    merchant: str = ""
     amount_paise: int
     decision: Decision
     deterministic_result: EngineResult

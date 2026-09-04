@@ -13,8 +13,10 @@ silent allow of an unrecorded payment.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from firewall.combiner import combine
@@ -155,6 +157,7 @@ def authorize(request: AuthorizationRequest) -> AuthorizeResponse:
     record = DecisionRecord(
         request_id=request.request_id,
         user_id=request.user_id,
+        merchant=request.merchant,
         amount_paise=request.amount_paise,
         decision=final,
         deterministic_result=det,
@@ -199,6 +202,7 @@ def confirm(request_id: str, remember: bool = False) -> AuthorizeResponse:
     record = DecisionRecord(
         request_id=request_id,
         user_id=request.user_id,
+        merchant=request.merchant,
         amount_paise=request.amount_paise,
         decision=Decision.ALLOW,
         deterministic_result=EngineResult(
@@ -234,3 +238,40 @@ def read_policy(user_id: str) -> dict:
 def audit_verify() -> dict:
     valid, error = audit.verify_chain()
     return {"valid": valid, "error": error, "entries": len(audit.read_all())}
+
+
+@app.get("/audit/recent")
+def audit_recent(limit: int = 25, user_id: str | None = None) -> dict:
+    """Most-recent decisions first, for the live feed."""
+    entries = audit.read_all()
+    if user_id:
+        entries = [e for e in entries if e.get("user_id") == user_id]
+    recent = list(reversed(entries))[: max(1, min(limit, 200))]
+    fields = ("request_id", "user_id", "amount_paise", "decision", "executed",
+              "order_id", "reasons", "timestamp", "llm_status", "risk_anomaly",
+              "intent_match", "manipulation_suspected", "entry_hash", "merchant",
+              "deterministic_result")
+    return {"count": len(recent),
+            "decisions": [{k: e.get(k) for k in fields} for e in recent]}
+
+
+@app.get("/pending")
+def list_pending() -> dict:
+    """Payments currently held awaiting human confirmation."""
+    held = pending_store.list_all()
+    return {"count": len(held),
+            "pending": [
+                {"request_id": r.request_id, "user_id": r.user_id,
+                 "amount_paise": r.amount_paise, "merchant": r.merchant,
+                 "category": r.category, "user_intent": r.user_intent,
+                 "timestamp": r.timestamp}
+                for r in held
+            ]}
+
+
+# --- Serve the built React dashboard (single-app: no separate frontend host) ---
+# Mounted LAST so all API routes above take precedence. Only mounts if the
+# frontend has been built (frontend/dist exists).
+_frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _frontend_dist.exists():
+    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")

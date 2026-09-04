@@ -229,3 +229,25 @@ def test_audit_verify_endpoint(client, monkeypatch):
     v = client.get("/audit/verify").json()
     assert v["valid"] is True
     assert v["entries"] == 2
+
+
+def test_audit_recent_endpoint(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    client.post("/authorize", json=_base_request("500.00"))
+    client.post("/authorize", json=_base_request("5000.00"))  # BLOCK (over cap)
+    data = client.get("/audit/recent?limit=10").json()
+    assert data["count"] == 2
+    # Most recent first: the BLOCK is newest.
+    assert data["decisions"][0]["decision"] == "BLOCK"
+    assert "reasons" in data["decisions"][0]
+
+
+def test_pending_endpoint_lists_held(client, monkeypatch):
+    monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
+    client.put("/policy/user_1", json={"merchant_allowlist": ["BigBasket"]})
+    req = _base_request("500.00")
+    req["merchant"] = "MysteryMart"
+    client.post("/authorize", json=req)  # -> STEP_UP, held
+    data = client.get("/pending").json()
+    assert data["count"] == 1
+    assert data["pending"][0]["merchant"] == "MysteryMart"

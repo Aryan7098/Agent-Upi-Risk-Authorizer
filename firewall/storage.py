@@ -184,3 +184,13 @@ class PendingStore:
                 pending_table.delete().where(pending_table.c.request_id == request_id)
             )
         return AuthorizationRequest(**json.loads(row[0]))
+
+    def list_all(self) -> list[AuthorizationRequest]:
+        """All currently-held requests (most recent first)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(pending_table.c.request_json).order_by(
+                    pending_table.c.created_at.desc()
+                )
+            ).all()
+        return [AuthorizationRequest(**json.loads(r[0])) for r in rows]
