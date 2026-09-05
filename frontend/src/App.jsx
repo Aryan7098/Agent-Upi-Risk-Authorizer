@@ -1297,21 +1297,38 @@ function GoogleSignIn({ onLogin }) {
       const p = decodeJwt(resp.credential)
       if (p?.email) cb.current({ id: p.email, name: p.name || p.email, picture: p.picture, google: true })
     }
+    // Render the button at the container's width so it lines up with the
+    // full-width fields below it. GIS caps width at 400px.
+    const renderBtn = () => {
+      if (!window.google?.accounts?.id || !ref.current) return
+      const w = Math.min(400, Math.max(240, Math.floor(ref.current.clientWidth || 320)))
+      ref.current.innerHTML = ''
+      window.google.accounts.id.renderButton(ref.current, {
+        theme: 'outline', size: 'large', text: 'continue_with',
+        shape: 'rectangular', logo_alignment: 'center', width: w,
+      })
+    }
     const init = () => {
       if (!window.google?.accounts?.id || !ref.current) return false
       window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handle })
-      window.google.accounts.id.renderButton(ref.current, { theme: 'filled_black', size: 'large', text: 'continue_with', width: 300, shape: 'rectangular' })
+      renderBtn()
       return true
     }
-    if (init()) return
-    const s = document.createElement('script')
-    s.src = 'https://accounts.google.com/gsi/client'; s.async = true; s.defer = true; s.onload = init
-    document.head.appendChild(s)
+    let attached = false
+    if (init()) { window.addEventListener('resize', renderBtn); attached = true }
+    else {
+      const s = document.createElement('script')
+      s.src = 'https://accounts.google.com/gsi/client'; s.async = true; s.defer = true
+      s.onload = () => { if (init()) { window.addEventListener('resize', renderBtn); attached = true } }
+      document.head.appendChild(s)
+    }
+    return () => { if (attached) window.removeEventListener('resize', renderBtn) }
   }, [])
   if (!GOOGLE_CLIENT_ID) return null
   return (
     <>
-      <div ref={ref} className="flex justify-center" />
+      {/* min-height reserves space so the card doesn't jump before GIS renders */}
+      <div ref={ref} className="flex min-h-[40px] w-full justify-center [color-scheme:light]" />
       <div className="flex items-center gap-3 text-[11px] text-faint">
         <span className="h-px flex-1 bg-line" />or<span className="h-px flex-1 bg-line" />
       </div>
