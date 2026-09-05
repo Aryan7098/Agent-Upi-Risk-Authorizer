@@ -22,7 +22,10 @@ services:
         value: openai/gpt-oss-120b
       - key: GEMINI_MODEL
         value: gemini-flash-lite-latest
-      # Optional: baked into the frontend at build time to enable Clerk auth.
+      # Baked into the frontend at build time. Google sign-in is the default.
+      - key: VITE_GOOGLE_CLIENT_ID
+        sync: false
+      # Clerk is opt-in and off by default (also needs VITE_USE_CLERK=true).
       - key: VITE_CLERK_PUBLISHABLE_KEY
         sync: false
       # Injected from the managed database below.

@@ -4,8 +4,12 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-# Clerk publishable key is baked in at build time (Vite). Optional — without it
-# the app falls back to the lightweight username login.
+# Frontend build-time config (Vite bakes VITE_* at build). Google sign-in is the
+# default; Clerk is opt-in (needs VITE_USE_CLERK=true as well) and off by default.
+ARG VITE_GOOGLE_CLIENT_ID=""
+ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
+ARG VITE_USE_CLERK=""
+ENV VITE_USE_CLERK=$VITE_USE_CLERK
 ARG VITE_CLERK_PUBLISHABLE_KEY=""
 ENV VITE_CLERK_PUBLISHABLE_KEY=$VITE_CLERK_PUBLISHABLE_KEY
 RUN npm run build

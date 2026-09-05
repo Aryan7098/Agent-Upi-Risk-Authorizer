@@ -1638,8 +1638,13 @@ function ClerkGate() {
   )
 }
 
+// Clerk is opt-in: it activates ONLY when a key is present AND VITE_USE_CLERK is
+// explicitly "true". This prevents a leftover/baked Clerk key from forcing the
+// app into Clerk mode — the default is the Google + username sign-in.
+const USE_CLERK = !!CLERK_KEY && import.meta.env.VITE_USE_CLERK === 'true'
+
 export default function App() {
-  if (!CLERK_KEY) return <LocalAuthApp />
+  if (!USE_CLERK) return <LocalAuthApp />
   return (
     <ClerkProvider publishableKey={CLERK_KEY} afterSignOutUrl="/" appearance={CLERK_APPEARANCE}>
       <ClerkGate />
