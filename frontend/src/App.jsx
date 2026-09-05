@@ -1096,6 +1096,10 @@ function Developers({ user }) {
             Base URL <span className="mono text-mute">{origin}</span> · test mode, no real money moves.
             Send an <span className="mono text-mute">Idempotency-Key</span> so a retry replays the same verdict instead of paying twice. Keys are rate-limited per minute.
           </p>
+          <p className="text-xs leading-relaxed text-faint">
+            Read the limits you run under with the same key: <span className="mono text-mute">GET {origin}/policy</span>.
+            It's <span className="text-mute">read-only</span> — policy is edited in the Policy tab, never by a key, so an agent can't loosen its own guardrails.
+          </p>
         </div>
       </div>
     </section>

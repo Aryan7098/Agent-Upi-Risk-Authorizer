@@ -281,6 +281,42 @@ def test_authorize_with_api_key_scopes_to_owner(client, monkeypatch):
     assert recent["decisions"][0]["user_id"] == "alice"
 
 
+def test_policy_read_via_api_key_returns_owner_policy(client):
+    key = client.post("/keys", json={"user_id": "alice"}).json()["key"]
+    # Owner sets a policy via the dashboard path (no key).
+    client.put("/policy/alice", json={"per_txn_cap": "1500.00"})
+    r = client.get("/policy", headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == "alice"
+    assert body["policy"]["per_txn_cap"] == "1500.00"
+
+
+def test_policy_read_without_key_is_401(client):
+    assert client.get("/policy").status_code == 401
+
+
+def test_api_key_cannot_write_policy(client):
+    key = client.post("/keys", json={"user_id": "alice"}).json()["key"]
+    r = client.put("/policy/alice", json={"per_txn_cap": "9999.00"},
+                   headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 403
+    # The policy was NOT changed by the key.
+    assert client.get("/policy/alice").json()["policy"]["per_txn_cap"] != "9999.00"
+
+
+def test_api_key_cannot_read_another_users_policy(client):
+    key = client.post("/keys", json={"user_id": "alice"}).json()["key"]
+    r = client.get("/policy/bob", headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 403
+
+
+def test_dashboard_can_still_read_and_write_policy_without_key(client):
+    # Same-origin dashboard flow is unchanged.
+    assert client.put("/policy/alice", json={"per_txn_cap": "1200.00"}).status_code == 200
+    assert client.get("/policy/alice").json()["policy"]["per_txn_cap"] == "1200.00"
+
+
 def test_authorize_with_key_needs_no_user_id_in_body(client, monkeypatch):
     monkeypatch.setattr(main.rail, "create_order", lambda **k: _fake_order(**k))
     key = client.post("/keys", json={"user_id": "alice"}).json()["key"]

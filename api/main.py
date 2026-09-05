@@ -193,6 +193,18 @@ def _bearer_token(authorization: str | None) -> str | None:
     return None
 
 
+def _key_owner(authorization: str | None) -> str | None:
+    """Resolve the user_id that owns a presented API key. Returns None when no
+    key is presented (same-origin dashboard call); raises 401 on an invalid key."""
+    token = _bearer_token(authorization)
+    if token is None:
+        return None
+    owner = api_key_store.resolve(token)
+    if owner is None:
+        raise HTTPException(status_code=401, detail="invalid or revoked API key")
+    return owner
+
+
 @app.post("/authorize", response_model=AuthorizeResponse)
 def authorize(
     request: AuthorizationRequest,
@@ -320,15 +332,48 @@ def confirm(request_id: str, remember: bool = False) -> AuthorizeResponse:
     return _to_response(record)
 
 
+@app.get("/policy")
+def read_my_policy(authorization: str | None = Header(default=None)) -> dict:
+    """Read the policy for the API key's owner (read-only, for agents).
+
+    An agent can see the guardrails it operates under, but never change them —
+    policy edits are made by the human in the dashboard, not by a key holder."""
+    owner = _key_owner(authorization)
+    if owner is None:
+        raise HTTPException(
+            status_code=401,
+            detail="authenticate with an API key (or read /policy/{user_id} from the dashboard)",
+        )
+    return {"user_id": owner, "policy": get_policy(owner).model_dump(mode="json")}
+
+
 @app.put("/policy/{user_id}")
-def set_policy(user_id: str, policy: UserPolicy) -> dict:
-    """Set a user's policy (caps in rupees, e.g. "monthly_cap": "50000.00")."""
+def set_policy(
+    user_id: str,
+    policy: UserPolicy,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Set a user's policy (caps in rupees, e.g. "monthly_cap": "50000.00").
+
+    Policy is read-only over the API: a presented API key is rejected here so an
+    agent can never loosen the limits it runs under. Edits come from the owner's
+    dashboard (same-origin)."""
+    if _bearer_token(authorization) is not None:
+        _key_owner(authorization)  # validate the key (401 if bad) before refusing
+        raise HTTPException(
+            status_code=403,
+            detail="API keys are read-only for policy; edit it from the dashboard",
+        )
     policy_store.set(user_id, policy)
     return {"user_id": user_id, "policy": policy.model_dump(mode="json")}
 
 
 @app.get("/policy/{user_id}")
-def read_policy(user_id: str) -> dict:
+def read_policy(user_id: str, authorization: str | None = Header(default=None)) -> dict:
+    # A key may only read its own policy; the dashboard (no key) reads by path.
+    owner = _key_owner(authorization)
+    if owner is not None and owner != user_id:
+        raise HTTPException(status_code=403, detail="an API key can only read its own policy")
     return {"user_id": user_id, "policy": get_policy(user_id).model_dump(mode="json")}
 
 
