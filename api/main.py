@@ -19,6 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -437,6 +438,66 @@ def list_pending() -> dict:
                  "timestamp": r.timestamp}
                 for r in held
             ]}
+
+
+_PRIVACY_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AURA — Privacy Policy</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0B0C0E; color:#E7E8EB; font-family: system-ui, -apple-system, sans-serif;
+         line-height:1.65; }
+  main { max-width: 720px; margin: 0 auto; padding: 64px 24px 96px; }
+  h1 { font-size: 1.9rem; letter-spacing:-0.02em; margin:0 0 4px; }
+  .eyebrow { font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:#6B6D75; }
+  h2 { font-size:1.05rem; margin:36px 0 8px; color:#E7E8EB; }
+  p, li { color:#9B9DA4; font-size:0.95rem; }
+  a { color:#E7E8EB; }
+  .updated { color:#6B6D75; font-size:0.85rem; margin-top:8px; }
+  hr { border:none; border-top:1px solid #232529; margin:28px 0; }
+</style></head><body><main>
+  <div class="eyebrow">AURA — Agent UPI Risk Authorizer</div>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Test-mode application. Last updated: September 2026.</p>
+  <hr>
+  <p>AURA is a demonstration payment-screening firewall operated in <strong>test mode only</strong>.
+     No real money moves and no real payment instruments are processed. This policy explains what
+     limited data the app handles.</p>
+
+  <h2>What we collect</h2>
+  <ul>
+    <li><strong>Sign-in identity.</strong> If you sign in with Google, we receive your name and email
+        address to identify your session and scope your data to you. We store only an account identifier
+        and display name.</li>
+    <li><strong>Payment-screening data you submit.</strong> The amount, merchant, category, and intent of
+        the test payments you screen, plus the resulting decisions, are stored to power your ledger,
+        policy, and audit trail.</li>
+    <li><strong>API keys.</strong> Keys you create are stored only as a one-way hash; the secret itself is
+        shown once and never retained.</li>
+  </ul>
+
+  <h2>How we use it</h2>
+  <p>Solely to operate the app for you: authenticating your session, enforcing your policy, screening test
+     payments, and displaying your history. We do not sell data or use it for advertising.</p>
+
+  <h2>Data retention & deletion</h2>
+  <p>You can erase all of your data at any time from the dashboard ("Delete data"), which removes your
+     audit entries, policy, held payments, and API keys.</p>
+
+  <h2>Third parties</h2>
+  <p>Sign-in is handled via Google. Test payment orders are created on Razorpay's test rail. Risk
+     evaluation may call Groq and Google Gemini APIs. No real financial data is involved.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy: <a href="mailto:aryangopinathan07@gmail.com">aryangopinathan07@gmail.com</a>.</p>
+</main></body></html>"""
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy() -> HTMLResponse:
+    """Public privacy policy — required for the Google OAuth consent screen."""
+    return HTMLResponse(content=_PRIVACY_HTML)
 
 
 # --- Serve the built React dashboard (single-app: no separate frontend host) ---
