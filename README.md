@@ -1,25 +1,43 @@
 # AURA — Agent UPI Risk Authorizer
 
-**A payment-intent firewall that gates AI-agent payments against Razorpay.**
+[![Live Demo](https://img.shields.io/badge/demo-live-46B08A)](https://aura-upi-firewall.onrender.com) [![Tests](https://img.shields.io/badge/tests-102%20passing-46B08A)](tests)
 
-AURA sits between an AI agent and Razorpay's payment APIs. It intercepts every
-payment an agent attempts, evaluates it against user-defined policy, an ML risk
-model, and an AI intent/integrity check, decides **ALLOW / STEP-UP / BLOCK**,
-writes a tamper-evident audit entry explaining why, and only then lets the money
-action reach the rail. A live React dashboard sits on top of it all.
+**🔗 Live demo: https://aura-upi-firewall.onrender.com**
+*(free tier — the first load may take ~30s to wake the server)*
 
+**A payment-intent firewall that sits between an AI agent and the UPI rail.**
+
+AURA screens every payment an AI agent tries to make *before any money moves* —
+clearing the safe ones, holding the doubtful ones for a human, and blocking
+abuse — using deterministic rules, an ML risk model, and an AI intent judge,
+decides **ALLOW / STEP-UP / BLOCK**, writes a tamper-evident audit entry
+explaining why, and only then lets the payment reach the rail. A live React
+dashboard sits on top of it all.
+
+> As NPCI's **Unified Agent Protocol** prepares to let AI agents pay over UPI
+> without approving every transaction, AURA is the missing safety layer that
+> screens, contains, and audits every agentic payment before money moves.
+> Nothing in the market does this today.
+>
 > Built for the Razorpay Buildathon. **Test mode only — no real funds ever move.**
 
 ---
 
 ## Why
 
-AI agents are starting to spend real money. The risk isn't just "too much" — it's
-a payment that doesn't match what the user actually authorized, or an agent that
-has been manipulated (e.g. prompt-injected) into paying the wrong party. AURA
-treats deterministic spend limits as the baseline floor and layers intent &
-integrity checking on top, with every decision bounded, gated, auditable, and
-explainable.
+AI agents are starting to spend real money — and it's about to become official
+infrastructure. **NPCI, which runs UPI, is rolling out the Unified Agent Protocol**,
+which will let AI agents make UPI payments on your behalf without approving every
+transaction; NPCI's own vision calls for rule-based spending limits, audit trails,
+and identity verification. But nothing today independently checks that each
+agentic payment is safe before it executes.
+
+The risk isn't just "too much" — it's a payment that doesn't match what the user
+actually authorized, or an agent that has been manipulated (e.g. prompt-injected)
+into paying the wrong party. AURA treats deterministic spend limits as the
+baseline floor and layers intent & integrity checking on top, with every decision
+bounded, gated, auditable, and explainable — exactly the control-and-accountability
+layer the agentic-payments era needs.
 
 ## Core principles
 
@@ -81,23 +99,26 @@ triggered reason recorded.
 ## The dashboard
 
 A React + Vite + Tailwind single-page app, served by FastAPI itself (same origin,
-no CORS). Five sections:
+no CORS), fronted by a marketing landing page. Its sections:
 
-- **Overview** — live KPIs, verdict distribution, a "what's catching payments"
-  breakdown, system/integrity status, the latest decision, and the live ledger.
+- **Overview** — live KPIs, a decision-volume-over-time chart, a "what's catching
+  payments" breakdown, system/integrity status, the latest decision, and the live
+  ledger.
+- **Policy** — set your spending caps, payment-frequency limits, and merchant
+  allow/deny + category lists.
 - **Payments** — describe a payment an agent wants to make and watch AURA clear,
   hold, or block it live. An **AI drafter** writes the agent's reason in an
   honest / borderline / manipulative style (Groq→Gemini) to demo each outcome.
+- **Pending** — approve payments AURA has held for you.
 - **Ledger** — the full, filterable audit feed with search, chain verification,
   and click-to-expand rows showing the three-signal breakdown.
-- **Policy** — set your spending caps, payment-frequency limits, and merchant
-  allow/deny + category lists.
-- **Pending** — approve payments AURA has held for you.
+- **Developers** — mint / revoke API keys (hashed, shown once), a live
+  "test this key" call, and drop-in cURL / Python / JavaScript integration code.
 
-Sign-in is via **Clerk** when a publishable key is configured, otherwise a
-lightweight username login; every view is scoped to the signed-in user, who can
-also erase all of their data (audit entries are removed and the hash chain is
-re-sealed so it still verifies).
+Sign-in is via **Google** (Google Identity Services) with a lightweight username
+login as a fallback; every view is scoped to the signed-in user, who can also
+erase all of their data (audit entries are removed and the hash chain is re-sealed
+so it still verifies).
 
 ## Getting started
 
@@ -134,26 +155,39 @@ npm run dev      # dev server on :5173, proxies the API to :8000
 npm run build    # outputs frontend/dist, which api/main.py mounts at /
 ```
 
-Optional Clerk auth — create an app at [clerk.com](https://clerk.com), then add
-to `frontend/.env.local`:
+Optional Google sign-in — create an OAuth client ID at
+[console.cloud.google.com](https://console.cloud.google.com), add your origin as
+an authorized JavaScript origin, then add to `frontend/.env.local`:
 ```
-VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
+VITE_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
 ```
+Without it, the app uses the built-in username login. (A Clerk-based login is also
+supported behind `VITE_USE_CLERK=true` + `VITE_CLERK_PUBLISHABLE_KEY`.)
 
 ## API
 
 | Method & path                 | Purpose                                                    |
 |-------------------------------|------------------------------------------------------------|
 | `GET  /health`                | Liveness + whether Razorpay keys are configured.           |
-| `POST /authorize`             | Evaluate a payment intent → ALLOW / STEP_UP / BLOCK.       |
+| `POST /authorize`             | Evaluate a payment intent → ALLOW / STEP_UP / BLOCK. Accepts `Authorization: Bearer <key>` and an `Idempotency-Key` header. |
 | `POST /confirm/{id}`          | Human resolves a held STEP_UP; executes the action. `?remember=true` also trusts the merchant. |
-| `PUT  /policy/{user_id}`      | Set a user's caps, frequency limits & lists (in rupees).   |
-| `GET  /policy/{user_id}`      | Read a user's policy.                                       |
+| `POST /keys`                  | Mint an API key for a user (plaintext returned once).      |
+| `GET  /keys`                  | List a user's keys (masked).                               |
+| `DELETE /keys/{id}`           | Revoke a key.                                              |
+| `PUT  /policy/{user_id}`      | Set a user's caps, frequency limits & lists (in rupees). Read-only over the API — a key is refused here. |
+| `GET  /policy`                | Read the API key owner's policy (read-only, for agents).   |
+| `GET  /policy/{user_id}`      | Read a user's policy (key-scoped to its owner).            |
 | `GET  /pending`               | Payments currently held awaiting confirmation.             |
 | `GET  /audit/recent`          | Most-recent decisions (for the live feed; `?user_id=` scopes). |
 | `GET  /audit/verify`          | Verify the audit hash chain is intact.                     |
 | `DELETE /profile/{user_id}`   | Erase a user's data; audit chain is re-sealed and still verifies. |
 | `POST /simulate/agent-note`   | Demo helper: AI-draft an agent reason in a given style.    |
+
+An external agent authenticates with an API key: the key's owner becomes the
+authoritative `user_id`, calls are **rate-limited per key**, and an
+`Idempotency-Key` makes a retry replay the original verdict instead of paying
+twice. API keys can **read** policy but never **write** it — an agent can't loosen
+the limits it runs under.
 
 ### Example
 
@@ -197,7 +231,7 @@ tests/         # unit + integration tests
 ## Tests
 
 ```bash
-pytest -q      # 80 tests
+pytest -q      # 102 tests
 ```
 
 ## Failure modes handled
@@ -225,13 +259,15 @@ let through. See [EVAL.md](EVAL.md) for full results and limitations.
 - **Phase 4 ✅** AI intent & integrity judge (Groq→Gemini), ML risk layer, decision combiner, LLM-outage fallback.
 - **Phase 5 ✅** Evaluation harness: labeled dataset, precision/recall, false-positive rate + cost.
 - **Phase 6 ✅** Database persistence (SQLite/Postgres) for policies, audit chain, and held step-ups.
-- **Phase 7 ✅** React dashboard, Clerk auth, per-user scoping, and data erasure.
-- **Phase 8 ⏳** Deployment.
+- **Phase 7 ✅** React dashboard, auth, per-user scoping, and data erasure.
+- **Phase 8 ✅** Deployment (Docker + Render + Postgres), landing page, decision-volume chart, API keys, and hardening (per-key rate limiting, idempotency, read-only policy access).
 
 ## Status
 
-Phases 0–7 complete and tested. Four decision signals — deterministic rules (the
-hard floor), the ML risk model, and the Groq→Gemini AI judge — combine
-most-restrictively, with the ML and AI layers only ever escalating. Everything is
+**Live and deployed** at [aura-upi-firewall.onrender.com](https://aura-upi-firewall.onrender.com).
+All phases complete and tested (102 tests). Four decision signals — deterministic
+rules (the hard floor), the ML risk model, and the Groq→Gemini AI judge — combine
+most-restrictively, with the ML and AI layers only ever escalating. Agents
+integrate via a rate-limited, idempotent, key-authenticated API. Everything is
 persisted, auditable, and driven by a live dashboard. **Test mode only; no real
 money moves.**
