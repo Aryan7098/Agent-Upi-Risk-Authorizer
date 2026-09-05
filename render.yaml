@@ -3,7 +3,7 @@
 # this repo. Fill the secret env vars (marked sync:false) in the dashboard.
 services:
   - type: web
-    name: aura
+    name: aura-upi-firewall
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
