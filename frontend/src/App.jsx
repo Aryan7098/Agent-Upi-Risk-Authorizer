@@ -1328,7 +1328,7 @@ function GoogleSignIn({ onLogin }) {
   return (
     <>
       {/* min-height reserves space so the card doesn't jump before GIS renders */}
-      <div ref={ref} className="flex min-h-[40px] w-full justify-center [color-scheme:light]" />
+      <div ref={ref} className="flex min-h-[40px] w-full justify-center" />
       <div className="flex items-center gap-3 text-[11px] text-faint">
         <span className="h-px flex-1 bg-line" />or<span className="h-px flex-1 bg-line" />
       </div>
