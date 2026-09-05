@@ -398,7 +398,11 @@ class IdempotencyStore:
 
     @staticmethod
     def _scope(user_id: str, key: str) -> str:
-        return f"{user_id}\x00{key[:200]}"
+        # Length-prefix the user id so no (user_id, key) pair can collide with
+        # another, and use a printable separator — Postgres text columns reject
+        # NUL (0x00) bytes, which would 500 on insert. The client key is capped.
+        uid = user_id or ""
+        return f"{len(uid)}:{uid}:{key[:200]}"
 
     def get(self, user_id: str, key: str) -> dict | None:
         with self.engine.connect() as conn:

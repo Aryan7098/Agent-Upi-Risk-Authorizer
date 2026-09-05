@@ -228,6 +228,17 @@ def test_idempotency_first_write_wins_and_scopes_per_user(tmp_path):
     assert store.get("bob", "k1") is not None
 
 
+def test_idempotency_scope_is_nul_free_and_collision_safe():
+    # The scope is a DB primary key: it must never contain a NUL byte (Postgres
+    # text columns reject 0x00) and must uniquely separate (user_id, key) pairs
+    # even when either value contains the ':' separator character.
+    scope = IdempotencyStore._scope
+    assert "\x00" not in scope("alice", "k1")
+    # Ambiguous-looking pairs must still produce distinct scopes.
+    assert scope("a", "b:c") != scope("a:b", "c")
+    assert scope("1:x", "y") != scope("1", "x:y")
+
+
 def test_sql_audit_spend_and_velocity(tmp_path):
     from datetime import datetime, timedelta, timezone
     log = _seeded_log(tmp_path)  # req_1 (10000) + req_2 (20000) executed; req_3 blocked
